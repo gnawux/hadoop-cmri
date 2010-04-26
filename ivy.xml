@@ -260,6 +260,10 @@
       name="mockito-all"
       rev="${mockito-all.version}"
       conf="common->master"/>
+    <dependency org="org.apache.zookeeper"
+		name="zookeeper"
+		rev="${zookeeper.version}"
+		conf="common->master" />
 </dependencies>
   
 </ivy-module>

@@ -39,6 +39,8 @@
     value="[organisation]/[module]/[revision]/[module]-[revision]"/>
   <property name="maven2.pattern.ext"
     value="${maven2.pattern}.[ext]"/>
+  <property name="maven2.pattern.zk"
+    value="org/apache/hadoop/[module]/[revision]/[module]-[revision].[ext]"/>
   <!-- pull in the local repository -->
   <include url="${ivy.default.conf.dir}/ivyconf-local.xml"/>
   <settings defaultResolver="default"/>
@@ -53,9 +55,15 @@
       pattern="${maven2.pattern.ext}"
       m2compatible="true"
       />
+    <ibiblio name="maven2zk"
+      root="${repo.maven.org}"
+      pattern="${maven2.pattern.zk}"
+      m2compatible="true"
+	/>
     <chain name="default" dual="true">
       <resolver ref="local"/>
       <resolver ref="maven2"/>
+      <resolver ref="maven2zk"/>
     </chain>
     <chain name="internal">
       <resolver ref="local"/>
