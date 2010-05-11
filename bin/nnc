@@ -1,0 +1,83 @@
+#!/bin/bash
+#
+# nnc is used to start or stop all the namenodes listed in 
+# ${HADOOP_CONF_DIR}/namenodes except itself in slave mode,
+# and other administration work for NNC
+#
+# Author: Xu Wang &lt;gnawux(at)gmail(dot)com&gt;
+#################################################################
+
+SLAVE_NAMENODE_FLAG="-slave"
+
+bin=`dirname "$0"`
+bin=`cd "$bin"; pwd`
+
+. "$bin"/hadoop-config.sh
+
+if [ $# = 0 ]; then
+	echo "Usage: coming soon..."
+fi
+COMMAND=$1
+shift
+
+if [ -f "${HADOOP_CONF_DIR}/hadoop-env.sh" ]; then
+  . "${HADOOP_CONF_DIR}/hadoop-env.sh"
+fi
+
+if [ "$HADOOP_LOG_DIR" = "" ]; then
+  HADOOP_LOG_DIR="$HADOOP_HOME/logs"
+fi
+
+NNC_LOG_FILE=${HADOOP_LOG_DIR}/nnc.log
+
+if [ -e ${HADOOP_CONF_DIR}/namenodes ]
+then
+	NAMENODE_HOSTS=${HADOOP_CONF_DIR}/namenodes
+else
+	echo "FATAL: conf/namenodes file does not exist, could not start slave namenodes." > ${NNC_LOG_FILE}
+	exit -1
+fi
+
+kill_running_namenode(){
+
+	echo "INFO: Kill NameNodes" >> $NNC_LOG_FILE
+
+    psresult=$(${JAVA_HOME}/bin/jps | grep "NameNode")
+    ret=$?
+
+    if [ $ret -eq 0 ]; then
+        ${JAVA_HOME}/bin/jps | awk '/NameNode/ {print $1}' | xargs kill > /dev/null 2>&1
+        if [ $? -eq 0 ]; then
+            sleep 1
+            return 0
+        else
+			psresult=$(${JAVA_HOME}/bin/jps | grep "NameNode")
+			nnpid=$(echo $psresult | awk '{print $1}')
+			echo "ERROR: kill NameNode: namenode $nnpid could not be killed" >> $NNC_LOG_FILE
+            return 1
+        fi
+    else
+        echo "INFO: kill NameNode: no NameNode is running" >> $NNC_LOG_FILE
+        return 0
+    fi
+}
+
+start_master(){
+	echo "INFO: Start master NameNode" > ${NNC_LOG_FILE}
+	"$bin"/hadoop-daemon.sh --config $HADOOP_CONF_DIR start namenode
+}
+
+start_slaves(){
+	echo "INFO: Start slave NameNodes" > ${NNC_LOG_FILE}
+	"$bin"/hadoop-daemons.sh --config $HADOOP_CONF_DIR --hosts ${NAMENODE_HOSTS} start namenode ${SLAVE_NAMENODE_FLAG}
+}
+
+case ${COMMAND} in 
+	start-master) start_master
+	;;
+	start-slaves) start_slaves
+	;;
+	kill-running) kill_running_namenode
+	;;
+esac
+
