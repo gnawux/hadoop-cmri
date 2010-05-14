@@ -30,6 +30,8 @@ fi
 
 NNC_LOG_FILE=${HADOOP_LOG_DIR}/nnc.log
 
+mkdir -p $HADOOP_LOG_DIR
+
 if [ -e ${HADOOP_CONF_DIR}/namenodes ]
 then
 	NAMENODE_HOSTS=${HADOOP_CONF_DIR}/namenodes
@@ -37,6 +39,15 @@ else
 	echo "FATAL: conf/namenodes file does not exist, could not start slave namenodes." > ${NNC_LOG_FILE}
 	exit -1
 fi
+
+for_each_namenode(){
+	for slave in `cat "$NAMENODE_HOSTS"|sed  "s/#.*$//;s/.*localhost.*//;s/.*$(uname -n)//;/^$/d"`; do
+	 ping -c 1 -w 1 $slave >/dev/null 2>&1 && ssh $HADOOP_SSH_OPTS $slave $"${@// /\\ }" \
+	   2>&1 | sed "s/^/$slave: /" &
+	done
+
+	wait
+}
 
 kill_running_namenode(){
 
@@ -69,7 +80,7 @@ start_master(){
 
 start_slaves(){
 	echo "INFO: Start slave NameNodes" > ${NNC_LOG_FILE}
-	"$bin"/hadoop-daemons.sh --config $HADOOP_CONF_DIR --hosts ${NAMENODE_HOSTS} start namenode ${SLAVE_NAMENODE_FLAG}
+    for_each_namenode cd "$HADOOP_HOME" \; "$bin/hadoop-daemon.sh" --config $HADOOP_CONF_DIR start namenode ${SLAVE_NAMENODE_FLAG}
 }
 
 case ${COMMAND} in 
