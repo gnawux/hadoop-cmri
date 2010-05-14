@@ -32,6 +32,24 @@ NNC_LOG_FILE=${HADOOP_LOG_DIR}/nnc.log
 
 mkdir -p $HADOOP_LOG_DIR
 
+if [ "$HADOOP_PID_DIR" = "" ]; then
+  HADOOP_PID_DIR=/tmp
+fi
+
+mkdir -p $HADOOP_PID_DIR
+
+if [ "$HADOOP_IDENT_STRING" = "" ]; then
+  export HADOOP_IDENT_STRING="$USER"
+fi
+
+pid=$HADOOP_PID_DIR/hadoop-$HADOOP_IDENT_STRING-namenode.pid
+
+# Set default scheduling priority
+if [ "$HADOOP_NICENESS" = "" ]; then
+    export HADOOP_NICENESS=0
+fi
+
+
 if [ -e ${HADOOP_CONF_DIR}/namenodes ]
 then
 	NAMENODE_HOSTS=${HADOOP_CONF_DIR}/namenodes
@@ -73,7 +91,29 @@ kill_running_namenode(){
     fi
 }
 
-start_master(){
+nnc_get_status() {
+
+    NNC_HOST=$(uname -n)
+
+    if [ -f $pid ]; then
+      if ps `cat $pid` > /dev/null 2>&1; then
+		  
+		# 'master' or 'slave' if success
+        NNC_STATE=$(${NNC_HOME}/bin/hadoop dfsadmin -status $NNC_HOST:$NNC_PORT 2>/dev/null)
+        ret=$?
+
+        if [ $ret -ne 0 ]; then
+            NNC_STATE="Not configured"
+        fi
+
+      fi
+    fi
+
+	NNC_STATE="Not configured"
+}
+
+
+start_master_internal(){
 	echo "INFO: Start master NameNode" > ${NNC_LOG_FILE}
 	"$bin"/hadoop-daemon.sh --config $HADOOP_CONF_DIR start namenode
 }
@@ -81,6 +121,35 @@ start_master(){
 start_slaves(){
 	echo "INFO: Start slave NameNodes" > ${NNC_LOG_FILE}
     for_each_namenode cd "$HADOOP_HOME" \; "$bin/hadoop-daemon.sh" --config $HADOOP_CONF_DIR start namenode ${SLAVE_NAMENODE_FLAG}
+}
+
+start_master(){
+
+	nnc_get_status
+
+	if [ "$NNC_STATE" = "master" ]; then
+		return 0
+	fi
+	
+	if [ "$NNC_STATE" != "slave" ]; then
+		start_master_internal
+		return $?
+	fi
+
+	if $bin/hadoop dfsadmin --setasmaster $NNC_HOST:$NNC_PORT; then
+		nnc_get_status
+
+		if [ "$NNC_STATE" = "master" ]; then
+			echo "promote: primary succeeded" >> $NNC_LOG_FILE
+			return 0
+		else 
+			echo "promote: Not primary despite call." >> $NNC_LOG_FILE
+		fi
+		
+	else
+		echo "promote: Failed with exit code $?." >> $NNC_LOG_FILE
+	fi
+	return 1
 }
 
 case ${COMMAND} in 
