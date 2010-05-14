@@ -95,17 +95,6 @@ fi
 
 case $startStop in
 
-  (check)
-    if [ -f $pid ]; then
-      if ps `cat $pid` > /dev/null 2>&1; then
-        echo $command running as process `cat $pid`.
-        return 0
-      fi
-    fi
-	echo $command is not running.
-    exit 1
-    ;;
-
   (start)
 
     mkdir -p "$HADOOP_PID_DIR"
