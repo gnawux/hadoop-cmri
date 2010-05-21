@@ -36,6 +36,7 @@ public interface HdfsConstants {
   static public enum StartupOption{
     FORMAT  ("-format"),
     REGULAR ("-regular"),
+    SLAVE ("-slave"),
     UPGRADE ("-upgrade"),
     ROLLBACK("-rollback"),
     FINALIZE("-finalize"),
