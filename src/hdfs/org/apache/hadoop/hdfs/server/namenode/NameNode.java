@@ -40,6 +40,7 @@ import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocol;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.UpgradeCommand;
+import org.apache.hadoop.hdfs.server.protocol.NNCProtocol;
 import org.apache.hadoop.http.HttpServer;
 import org.apache.hadoop.ipc.*;
 import org.apache.hadoop.conf.*;
@@ -96,7 +97,7 @@ import java.util.Iterator;
  **********************************************************/
 public class NameNode implements ClientProtocol, DatanodeProtocol,
                                  NamenodeProtocol, FSConstants,
-                                 RefreshAuthorizationPolicyProtocol {
+                                 NNCProtocol, RefreshAuthorizationPolicyProtocol {
   static{
     Configuration.addDefaultResource("hdfs-default.xml");
     Configuration.addDefaultResource("hdfs-site.xml");
@@ -112,6 +113,8 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
       return NamenodeProtocol.versionID;
     } else if (protocol.equals(RefreshAuthorizationPolicyProtocol.class.getName())){
       return RefreshAuthorizationPolicyProtocol.versionID;
+    } else if (protocol.equals(NNCProtocol.class.getName())){
+        return NNCProtocol.versionID;
     } else {
       throw new IOException("Unknown protocol to name node: " + protocol);
     }
@@ -153,7 +156,7 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
   }
   
   public static InetSocketAddress getAddress(String address) {
-    return NetUtils.createSocketAddr(address, DEFAULT_PORT);
+    return NNSyncer.getMasterNameNodeAddress(conf);
   }
 
   public static InetSocketAddress getAddress(Configuration conf) {
@@ -171,8 +174,8 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
    * 
    * @param conf the configuration
    */
-  private void initialize(Configuration conf) throws IOException {
-    InetSocketAddress socAddr = NameNode.getAddress(conf);
+  private void initialize(String bindAddress, Configuration conf, boolean runAsMaster) throws IOException {
+	InetSocketAddress socAddr = NameNode.getAddress(bindAddress);
     int handlerCount = conf.getInt("dfs.namenode.handler.count", 10);
     
     // set service-level authorization security policy
@@ -198,7 +201,7 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
 
     myMetrics = new NameNodeMetrics(conf, this);
 
-    this.namesystem = new FSNamesystem(this, conf);
+    this.namesystem = new FSNamesystem(this, conf, runAsMaster);
     startHttpServer(conf);
     this.server.start();  //start RPC server   
     startTrashEmptier(conf);
@@ -274,13 +277,16 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
    * @param conf  confirguration
    * @throws IOException
    */
-  public NameNode(Configuration conf) throws IOException {
-    try {
-      initialize(conf);
-    } catch (IOException e) {
-      this.stop();
-      throw e;
-    }
+  public NameNode(Configuration conf, boolean runAsMaster) throws IOException {
+	this(NNSyncer.getAvailableURI(conf).getAuthority(), conf, runAsMaster);
+  }
+  private NameNode(String bindAddress, Configuration conf, boolean runAsMaster) throws IOException {
+	    try {
+	        initialize(bindAddress, conf,runAsMaster);
+	      } catch (IOException e) {
+	    	this.stop();
+	        throw e;
+	      }	  
   }
 
   /**
@@ -894,6 +900,7 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
     System.err.println(
       "Usage: java NameNode [" +
       StartupOption.FORMAT.getName() + "] | [" +
+      StartupOption.SLAVE.getName() + "] | [" +
       StartupOption.UPGRADE.getName() + "] | [" +
       StartupOption.ROLLBACK.getName() + "] | [" +
       StartupOption.FINALIZE.getName() + "] | [" +
@@ -911,6 +918,8 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
         startOpt = StartupOption.REGULAR;
       } else if (StartupOption.UPGRADE.getName().equalsIgnoreCase(cmd)) {
         startOpt = StartupOption.UPGRADE;
+      } else if (StartupOption.SLAVE.getName().equalsIgnoreCase(cmd)) {
+        startOpt = StartupOption.SLAVE;
       } else if (StartupOption.ROLLBACK.getName().equalsIgnoreCase(cmd)) {
         startOpt = StartupOption.ROLLBACK;
       } else if (StartupOption.FINALIZE.getName().equalsIgnoreCase(cmd)) {
@@ -943,18 +952,23 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
     }
     setStartupOption(conf, startOpt);
 
+    boolean isMaster=true;
     switch (startOpt) {
       case FORMAT:
         boolean aborted = format(conf, true);
         System.exit(aborted ? 1 : 0);
+      case SLAVE:
+    	isMaster=false;
+        break;
       case FINALIZE:
         aborted = finalize(conf, true);
         System.exit(aborted ? 1 : 0);
       default:
     }
 
-    NameNode namenode = new NameNode(conf);
-    return namenode;
+    NameNode namenode = new NameNode(conf, isMaster);
+:w
+return namenode;
   }
     
   /**
