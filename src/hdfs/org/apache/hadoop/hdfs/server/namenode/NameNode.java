@@ -967,7 +967,7 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
     }
 
     NameNode namenode = new NameNode(conf, isMaster);
-:w
+
 return namenode;
   }
     
