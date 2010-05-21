@@ -984,4 +984,64 @@ return namenode;
       System.exit(-1);
     }
   }
+  
+	public void setAsMaster(String masterName) throws IOException{
+		//rpy String name=this.nameNodeAddress.getHostName()+":"+this.nameNodeAddress.getPort(); 
+		String name=this.serverAddress.getHostName()+":"+this.serverAddress.getPort(); 
+		LOG.info("My address is "+name+" and new Master is "+masterName);
+		
+		if(name.equals(masterName)){
+			//I am the new Master
+			LOG.info("I will promote myself now");
+			if(this.namesystem.syncAgent instanceof NNSyncMaster){
+				LOG.info("I am originally a master, now exit method invocation.");
+				return;
+			}
+	    	this.namesystem.promote();
+		}else if(this.namesystem.syncAgent instanceof NNSyncMaster){
+			LOG.warn("trying to depromote a master!!");
+			throw new IOException("should not depremote a master now");
+		}else{
+			LOG.info("another node is promoted as master "+masterName);
+			this.namesystem.newMaster(masterName);
+		}
+	  }
+	  
+	  public boolean status(String masterName) throws IOException{
+			String name=this.namesystem.syncAgent.syncMasterAddress.getHostName()+":"+this.serverAddress.getPort();
+			//LOG.info("Check the status of "+masterName);
+			
+			if(name.equals(masterName)){
+				//LOG.info(masterName+ "'s status is true");
+				return true;
+			}else{
+				//LOG.info(masterName+ "'s status is false");
+				return false;
+			}
+		  }
+	  
+	  public int toggleNNC(String cmd) throws IOException{
+		  return namesystem.toggleNNC(cmd);
+	  }
+	  
+	  public String getMasterAddress() throws IOException{
+		  String masterName=this.namesystem.syncAgent.syncMasterAddress.getHostName()+":"+this.serverAddress.getPort();
+		  return masterName;
+	  }
+		
+	@Override
+	public void setSyncer(boolean enable) throws IOException {
+		// TODO Auto-generated method stub
+		
+	}
+
+	public NNSlaveInfo register(NNSlaveInfo slave) throws IOException {
+		  if(this.namesystem.syncAgent instanceof NNSyncMaster){
+			  NNSyncMaster sm=(NNSyncMaster)namesystem.syncAgent;
+			  return sm.register(slave);
+		  }else{
+			  return null;
+		  }
+	}
+
 }
