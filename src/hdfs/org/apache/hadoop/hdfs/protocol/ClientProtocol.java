@@ -474,4 +474,27 @@ public interface ClientProtocol extends VersionedProtocol {
    *              by this call.
    */
   public void setTimes(String src, long mtime, long atime) throws IOException;
+
+  /**
+   * set a NameNode as Master
+   * @param masterName
+   * @throws IOException
+   */
+  public void setAsMaster(String masterName) throws IOException;
+  
+  /**
+   * query the namenode is master or slave
+   * @param masterName
+   * @return true if master, false else
+   * @throws IOException
+   */
+  public boolean status(String masterName) throws IOException;
+  
+  /**
+   * get the address of the master namenode
+   * @return
+   * @throws IOException
+   */
+  public String getMasterAddress() throws IOException; 
+
 }

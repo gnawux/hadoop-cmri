@@ -153,4 +153,11 @@ public interface DatanodeProtocol extends VersionedProtocol {
       long newgenerationstamp, long newlength,
       boolean closeFile, boolean deleteblock, DatanodeID[] newtargets
       ) throws IOException;
+  
+  /**
+   * get the master address
+   * @return the address of master namenode
+   * @throws IOException
+   */
+  public String getMasterAddress() throws IOException; 
 }
