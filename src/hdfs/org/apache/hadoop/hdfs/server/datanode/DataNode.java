@@ -92,6 +92,8 @@ import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.DiskChecker.DiskErrorException;
 import org.apache.hadoop.util.DiskChecker.DiskOutOfSpaceException;
+import org.apache.hadoop.hdfs.zookeeper.AlwaysOnNameNode;
+import org.apache.hadoop.hdfs.zookeeper.ZkNameNode;
 
 /**********************************************************
  * DataNode is a class (and program) that stores a set of
@@ -153,7 +155,7 @@ public class DataNode extends Configured
     return NetUtils.createSocketAddr(target);
   }
   
-  public DatanodeProtocol namenode = null;
+  protected AlwaysOnNameNode zknn=null; 
   public FSDatasetInterface data = null;
   public DatanodeRegistration dnRegistration = null;
 
@@ -176,7 +178,6 @@ public class DataNode extends Configured
   private DataStorage storage = null;
   private HttpServer infoServer = null;
   DataNodeMetrics myMetrics;
-  private static InetSocketAddress nameNodeAddr;
   private InetSocketAddress selfAddr;
   private static DataNode datanodeObject = null;
   private Thread dataNodeThread = null;
@@ -243,7 +244,6 @@ public class DataNode extends Configured
                                      conf.get("dfs.datanode.dns.interface","default"),
                                      conf.get("dfs.datanode.dns.nameserver","default"));
     }
-    InetSocketAddress nameNodeAddr = NameNode.getAddress(conf);
     
     this.socketTimeout =  conf.getInt("dfs.socket.timeout",
                                       HdfsConstants.READ_TIMEOUT);
@@ -266,11 +266,9 @@ public class DataNode extends Configured
     this.dnRegistration = new DatanodeRegistration(machineName + ":" + tmpPort);
 
     // connect to name node
-    this.namenode = (DatanodeProtocol) 
-      RPC.waitForProxy(DatanodeProtocol.class,
-                       DatanodeProtocol.versionID,
-                       nameNodeAddr, 
-                       conf);
+    this.zknn = new ZkNameNode(DatanodeProtocol.class,DatanodeProtocol.versionID,conf);
+    zknn.init();
+
     // get version and id info from the name-node
     NamespaceInfo nsInfo = handshake();
     StartupOption startOpt = getStartupOption(conf);
@@ -407,11 +405,20 @@ public class DataNode extends Configured
            SocketChannel.open().socket() : new Socket();                                   
   }
   
+  /**
+   * get namenode from zookeeper for connection
+   * @return namenode proxy
+   * @throws IOException
+   */
+  public DatanodeProtocol requestnn() throws IOException{
+	  return (DatanodeProtocol)zknn.namenode();
+  }
+
   private NamespaceInfo handshake() throws IOException {
     NamespaceInfo nsInfo = new NamespaceInfo();
     while (shouldRun) {
       try {
-        nsInfo = namenode.versionRequest();
+        nsInfo = requestnn().versionRequest();
         break;
       } catch(SocketTimeoutException e) {  // namenode is busy
         LOG.info("Problem connecting to server: " + getNameNodeAddr());
@@ -428,7 +435,7 @@ public class DataNode extends Configured
         + Storage.getBuildVersion();
       LOG.fatal( errorMsg );
       try {
-        namenode.errorReport( dnRegistration,
+        requestnn().errorReport( dnRegistration,
                               DatanodeProtocol.NOTIFY, errorMsg );
       } catch( SocketTimeoutException e ) {  // namenode is busy
         LOG.info("Problem connecting to server: " + getNameNodeAddr());
@@ -460,7 +467,13 @@ public class DataNode extends Configured
   }
 
   public InetSocketAddress getNameNodeAddr() {
-    return nameNodeAddr;
+	  InetSocketAddress	nnAddr=null;
+	  try{
+		  nnAddr = zknn.address();
+	  } catch (IOException ie) {
+		  // ignore
+	  }
+	  return nnAddr;
   }
   
   public InetSocketAddress getSelfAddr() {
@@ -528,7 +541,7 @@ public class DataNode extends Configured
       try {
         // reset name to machineName. Mainly for web interface.
         dnRegistration.name = machineName + ":" + dnRegistration.getPort();
-        dnRegistration = namenode.register(dnRegistration);
+        dnRegistration = requestnn().register(dnRegistration);
         break;
       } catch(SocketTimeoutException e) {  // namenode is busy
         LOG.info("Problem connecting to server: " + getNameNodeAddr());
@@ -600,7 +613,7 @@ public class DataNode extends Configured
       }
     }
     
-    RPC.stopProxy(namenode); // stop the RPC threads
+    zknn.stop(); // stop RPC Proxy
     
     if(upgradeManager != null)
       upgradeManager.shutdownUpgrade();
@@ -654,14 +667,19 @@ public class DataNode extends Configured
     }
   }
   
+  final static int MAX_RETRY=10;
+  
   private void handleDiskError(String errMsgr) {
     LOG.warn("DataNode is shutting down.\n" + errMsgr);
     shouldRun = false;
-    try {
-      namenode.errorReport(
-                           dnRegistration, DatanodeProtocol.DISK_ERROR, errMsgr);
-    } catch(IOException ignored) {              
-    }
+    do{
+        try {
+            requestnn().errorReport(
+                                 dnRegistration, DatanodeProtocol.DISK_ERROR, errMsgr);
+            break;
+          } catch(IOException ignored) {
+          }
+    }while( ++retryCount < MAX_RETRY );
   }
     
   /** Number of concurrent xceivers per node. */
@@ -699,12 +717,25 @@ public class DataNode extends Configured
           // -- Bytes remaining
           //
           lastHeartbeat = startTime;
-          DatanodeCommand[] cmds = namenode.sendHeartbeat(dnRegistration,
+          DatanodeCommand[] cmds=null;
+          int retryCount=0;
+          do{
+        	  try{
+        		  cmds = requestnn().sendHeartbeat(dnRegistration,
                                                        data.getCapacity(),
                                                        data.getDfsUsed(),
                                                        data.getRemaining(),
                                                        xmitsInProgress.get(),
                                                        getXceiverCount());
+        		  break;
+        	  }catch(IOException ie){
+        		 LOG.warn("Exception while sendHB, retrying " + retryCount,ie); 
+        	  }
+          }while(++retryCount<MAX_RETRY);
+          
+          if( retryCount >= MAX_RETRY ){
+        	  throw new IOException("retry timeout");
+          }
           myMetrics.heartbeats.inc(now() - startTime);
           //LOG.info("Just sent heartbeat, with name " + localName);
           if (!processCommand(cmds))
@@ -733,7 +764,20 @@ public class DataNode extends Configured
           if(delHintArray == null || delHintArray.length != blockArray.length ) {
             LOG.warn("Panic: block array & delHintArray are not the same" );
           }
-          namenode.blockReceived(dnRegistration, blockArray, delHintArray);
+          int retryCount=0;
+          do{
+        	  try{
+        		  requestnn().blockReceived(dnRegistration, blockArray, delHintArray);
+        		  break;
+        	  }catch(IOException ie){
+        		 LOG.warn("Exception while report block received, retrying " + retryCount,ie); 
+        	  }
+          }while(++retryCount<MAX_RETRY);
+          
+          if( retryCount >= MAX_RETRY ){
+        	  throw new IOException("retry timeout");
+          }
+          
           synchronized (receivedBlockList) {
             synchronized (delHints) {
               for(int i=0; i<blockArray.length; i++) {
@@ -753,8 +797,22 @@ public class DataNode extends Configured
           //
           long brStartTime = now();
           Block[] bReport = data.getBlockReport();
-          DatanodeCommand cmd = namenode.blockReport(dnRegistration,
-                  BlockListAsLongs.convertToArrayLongs(bReport));
+          DatanodeCommand cmd=null;
+          int retryCount=0;
+          do{
+        	  try{
+        		  cmd = requestnn().blockReport(dnRegistration,
+                          BlockListAsLongs.convertToArrayLongs(bReport));
+        		  break;
+        	  }catch(IOException ie){
+        		 LOG.warn("Exception while sendHB, retrying " + retryCount,ie); 
+        	  }
+          }while(++retryCount<MAX_RETRY);
+          
+          if( retryCount >= MAX_RETRY ){
+        	  throw new IOException("retry timeout");
+          }
+          
           long brTime = now() - brStartTime;
           myMetrics.blockReports.inc(brTime);
           LOG.info("BlockReport of " + bReport.length +
@@ -929,9 +987,22 @@ public class DataNode extends Configured
       // block does not exist or is under-construction
       String errStr = "Can't send invalid block " + block;
       LOG.info(errStr);
-      namenode.errorReport(dnRegistration, 
-                           DatanodeProtocol.INVALID_BLOCK, 
-                           errStr);
+      int retryCount=0;
+      do{
+    	  try{
+    		  requestnn().errorReport(dnRegistration, 
+                    DatanodeProtocol.INVALID_BLOCK, 
+                    errStr);
+    		  break;
+    	  }catch(IOException ie){
+    		 LOG.warn("Exception while report error block, retrying " + retryCount,ie); 
+    	  }
+      }while(++retryCount<MAX_RETRY);
+      
+      if( retryCount >= MAX_RETRY ){
+    	  throw new IOException("retry timeout");
+      }
+
       return;
     }
 
@@ -939,9 +1010,21 @@ public class DataNode extends Configured
     long onDiskLength = data.getLength(block);
     if (block.getNumBytes() > onDiskLength) {
       // Shorter on-disk len indicates corruption so report NN the corrupt block
-      namenode.reportBadBlocks(new LocatedBlock[]{
-          new LocatedBlock(block, new DatanodeInfo[] {
-              new DatanodeInfo(dnRegistration)})});
+        int retryCount=0;
+        do{
+      	  try{
+      		  requestnn().reportBadBlocks(new LocatedBlock[]{
+      	          new LocatedBlock(block, new DatanodeInfo[] {
+                    new DatanodeInfo(dnRegistration)})});
+      		  break;
+      	  }catch(IOException ie){
+      		 LOG.warn("Exception while reportBadBlocks, retrying " + retryCount,ie); 
+      	  }
+        }while(++retryCount<MAX_RETRY);
+        
+        if( retryCount >= MAX_RETRY ){
+      	  throw new IOException("retry timeout");
+        } 
       LOG.info("Can't replicate block " + block
           + " because on-disk length " + onDiskLength 
           + " is shorter than NameNode recorded length " + block.getNumBytes());
@@ -1540,14 +1623,39 @@ public class DataNode extends Configured
     //syncList.isEmpty() that all datanodes do not have the block
     //so the block can be deleted.
     if (syncList.isEmpty()) {
-      namenode.commitBlockSynchronization(block, 0, 0, closeFile, true,
-          DatanodeID.EMPTY_ARRAY);
+        int retryCount=0;
+        do{
+      	  try{
+      		  requestnn().commitBlockSynchronization(block, 0, 0, closeFile, true,
+      		          DatanodeID.EMPTY_ARRAY);
+      		  break;
+      	  }catch(IOException ie){
+      		 LOG.warn("Exception while report error block, retrying " + retryCount,ie); 
+      	  }
+        }while(++retryCount<MAX_RETRY);
+        
+        if( retryCount >= MAX_RETRY ){
+      	  throw new IOException("retry timeout");
+        }
       return null;
     }
 
     List<DatanodeID> successList = new ArrayList<DatanodeID>();
 
-    long generationstamp = namenode.nextGenerationStamp(block);
+    long generationstamp = 0;
+    int retryCount=0;
+    do{
+  	  try{
+  		generationstamp = requestnn().nextGenerationStamp(block);
+  		  break;
+  	  }catch(IOException ie){
+  		 LOG.warn("Exception while report error block, retrying " + retryCount,ie); 
+  	  }
+    }while(++retryCount<MAX_RETRY);
+    
+    if( retryCount >= MAX_RETRY ){
+  	  throw new IOException("retry timeout");
+    }
     Block newblock = new Block(block.getBlockId(), block.getNumBytes(), generationstamp);
 
     for(BlockRecord r : syncList) {
@@ -1563,9 +1671,21 @@ public class DataNode extends Configured
     if (!successList.isEmpty()) {
       DatanodeID[] nlist = successList.toArray(new DatanodeID[successList.size()]);
 
-      namenode.commitBlockSynchronization(block,
-          newblock.getGenerationStamp(), newblock.getNumBytes(), closeFile, false,
-          nlist);
+      retryCount=0;
+      do{
+    	  try{
+    		requestnn().commitBlockSynchronization(block,
+    		          newblock.getGenerationStamp(), newblock.getNumBytes(), closeFile, false,
+    		          nlist);
+    		  break;
+    	  }catch(IOException ie){
+    		 LOG.warn("Exception while report error block, retrying " + retryCount,ie); 
+    	  }
+      }while(++retryCount<MAX_RETRY);
+      
+      if( retryCount >= MAX_RETRY ){
+    	  throw new IOException("retry timeout");
+      }
       DatanodeInfo[] info = new DatanodeInfo[nlist.length];
       for (int i = 0; i < nlist.length; i++) {
         info[i] = new DatanodeInfo(nlist[i]);
