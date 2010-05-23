@@ -41,7 +41,7 @@ public class DatanodeInfo extends DatanodeID implements Node {
   protected long capacity;
   protected long dfsUsed;
   protected long remaining;
-  protected long lastUpdate;
+  public long lastUpdate;
   protected int xceiverCount;
   protected String location = NetworkTopology.DEFAULT_RACK;
 

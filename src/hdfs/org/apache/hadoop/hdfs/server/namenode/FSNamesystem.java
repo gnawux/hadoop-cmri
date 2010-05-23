@@ -127,8 +127,8 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
   private PermissionStatus defaultPermission;
   // FSNamesystemMetrics counter variables
   private FSNamesystemMetrics myFSMetrics;
-  private long capacityTotal = 0L, capacityUsed = 0L, capacityRemaining = 0L;
-  private int totalLoad = 0;
+  long capacityTotal = 0L, capacityUsed = 0L, capacityRemaining = 0L;
+  int totalLoad = 0;
 
   volatile long pendingReplicationBlocksCount = 0L;
   volatile long corruptReplicaBlocksCount = 0L;
@@ -2141,7 +2141,7 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
   }
     
   /* Resolve a node's network location */
-  private void resolveNetworkLocation (DatanodeDescriptor node) {
+  void resolveNetworkLocation (DatanodeDescriptor node) {
     List<String> names = new ArrayList<String>(1);
     if (dnsToSwitchMapping instanceof CachedDNSToSwitchMapping) {
       // get the node's IP address
