@@ -427,7 +427,7 @@ public abstract class Storage extends StorageInfo {
       try { // check that storage exists
         if (!root.exists()) {
           // storage directory does not exist
-          if (startOpt != StartupOption.FORMAT) {
+          if ((startOpt != StartupOption.SLAVE)&&(startOpt != StartupOption.FORMAT)) {
             LOG.info("Storage directory " + rootPath + " does not exist.");
             return StorageState.NON_EXISTENT;
           }
