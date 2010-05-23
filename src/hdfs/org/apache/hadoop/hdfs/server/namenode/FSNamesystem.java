@@ -744,6 +744,15 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
        throw new SafeModeException("Cannot set permission for " + src, safeMode);
     checkOwner(src);
     dir.setPermission(src, permission);
+
+    if(syncAgent.shouldRecordUpdate && this.syncAgent instanceof NNSyncMaster){
+      	NNSyncMaster syncer=(NNSyncMaster)this.syncAgent;
+        NNUINodeInfo info=new NNUINodeInfo(src);
+        info.op=NNUINodeInfo.NNU_PERM;
+        info.perm=permission.toShort();
+        syncer.onUpdate(NNUpdateInfo.NNU_INODE, info);
+    }
+
     getEditLog().logSync();
     if (auditLog.isInfoEnabled()) {
       final FileStatus stat = dir.getFileInfo(src);
@@ -772,6 +781,14 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
       }
     }
     dir.setOwner(src, username, group);
+    if(syncAgent.shouldRecordUpdate && this.syncAgent instanceof NNSyncMaster){
+      	NNSyncMaster syncer=(NNSyncMaster)this.syncAgent;
+        NNUINodeInfo info=new NNUINodeInfo(src);
+        info.op=NNUINodeInfo.NNU_OWNER;
+        info.user=username;
+        info.group=group;
+        syncer.onUpdate(NNUpdateInfo.NNU_INODE, info);
+    }
     getEditLog().logSync();
     if (auditLog.isInfoEnabled()) {
       final FileStatus stat = dir.getFileInfo(src);
@@ -955,6 +972,13 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
   public boolean setReplication(String src, short replication) 
                                 throws IOException {
     boolean status = setReplicationInternal(src, replication);
+    if(status && syncAgent.shouldRecordUpdate && this.syncAgent instanceof NNSyncMaster){
+      	NNSyncMaster syncer=(NNSyncMaster)this.syncAgent;
+        NNUINodeInfo info=new NNUINodeInfo(src);
+        info.op=NNUINodeInfo.NNU_REP;
+        info.replication=replication;
+        syncer.onUpdate(NNUpdateInfo.NNU_INODE, info);
+    }
     getEditLog().logSync();
     if (status && auditLog.isInfoEnabled()) {
       logAuditEvent(UserGroupInformation.getCurrentUGI(),
@@ -1192,6 +1216,10 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
         if (newNode == null) {
           throw new IOException("DIR* NameSystem.startFile: " +
                                 "Unable to add file to namespace.");
+        }else if(syncAgent.shouldRecordUpdate && this.syncAgent instanceof NNSyncMaster){//sync new inode to others
+        	  NNSyncMaster syncer=(NNSyncMaster)this.syncAgent;
+        	  syncer.onUpdate(NNUpdateInfo.NNU_NEWFILE, new NNUStartFile(src, permissions, replication, 
+    			blockSize, holder, clientMachine, clientNode, genstamp));
         }
         leaseManager.addLease(newNode.clientName, src);
         if (NameNode.stateChangeLog.isDebugEnabled()) {
@@ -1355,6 +1383,20 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
         dn.incBlocksScheduled();
       }      
     }
+
+    if(syncAgent.shouldRecordUpdate && this.syncAgent instanceof NNSyncMaster){
+    	NNSyncMaster syncer=(NNSyncMaster)this.syncAgent;
+    	NNUpdateBlk  blk=new NNUpdateBlk();
+    	blk.add=true;
+    	blk.blk=newBlock;
+    	blk.src=src;
+    	blk.holder=clientName;
+    	blk.dnodes=new LinkedList<String>();
+    	for(int i=0;i<targets.length;i++){
+    		blk.dnodes.add(targets[i].storageID);
+    	}
+      syncer.onUpdate(NNUpdateInfo.NNU_BLK, blk);
+    }
         
     // Create next block
     return new LocatedBlock(newBlock, targets, fileLength);
@@ -1372,6 +1414,16 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
                                   +b+"of file "+src);
     INodeFileUnderConstruction file = checkLease(src, holder);
     dir.removeBlock(src, file, b);
+    if(syncAgent.shouldRecordUpdate && this.syncAgent instanceof NNSyncMaster){
+      	NNSyncMaster syncer=(NNSyncMaster)this.syncAgent;
+      	NNUpdateBlk  blk=new NNUpdateBlk();
+      	blk.add=false;
+      	blk.blk=b;
+      	blk.src=src;
+      	blk.holder=holder;
+      	blk.dnodes=null;
+        syncer.onUpdate(NNUpdateInfo.NNU_BLK, blk);
+    }
     NameNode.stateChangeLog.debug("BLOCK* NameSystem.abandonBlock: "
                                     + b
                                     + " is removed from pendingCreates");
@@ -1461,6 +1513,14 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
 
     NameNode.stateChangeLog.info("DIR* NameSystem.completeFile: file " + src
                                   + " is closed by " + holder);
+    if(syncAgent.shouldRecordUpdate && this.syncAgent instanceof NNSyncMaster){
+    	NNSyncMaster syncer=(NNSyncMaster)this.syncAgent;
+      NNUCloseNewFile act=new NNUCloseNewFile();
+      act.op=NNUCloseNewFile.NNU_CPLF;
+      act.holder=holder;
+      act.src=src;
+      syncer.onUpdate(NNUpdateInfo.NNU_CLSFILE, act);
+    }
     return CompleteFileStatus.COMPLETE_SUCCESS;
   }
 
@@ -1671,6 +1731,19 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
     if (count > 1) {
       addToInvalidates(blk, dn);
       removeStoredBlock(blk, node);
+      
+      if(syncAgent.shouldRecordUpdate && this.syncAgent instanceof NNSyncMaster){
+      	NNSyncMaster syncer=(NNSyncMaster)this.syncAgent;
+      	NNUpdateBlk  ublk=new NNUpdateBlk();
+      	ublk.add=false;
+      	ublk.blk=blk;
+      	ublk.src="";
+      	ublk.holder="";
+      	ublk.dnodes=new LinkedList<String>();
+      	ublk.dnodes.add(node.getStorageID());
+        syncer.onUpdate(NNUpdateInfo.NNU_BLK, ublk);
+      }
+
       NameNode.stateChangeLog.debug("BLOCK* NameSystem.invalidateBlocks: "
                                    + blk + " on " 
                                    + dn.getName() + " listed for deletion.");
@@ -1726,6 +1799,13 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
     FileStatus dinfo = dir.getFileInfo(dst);
     if (dir.renameTo(src, dst)) {
       changeLease(src, dst, dinfo);     // update lease with new filename
+      if(syncAgent.shouldRecordUpdate && this.syncAgent instanceof NNSyncMaster){
+      	NNSyncMaster syncer=(NNSyncMaster)this.syncAgent;
+      	NNUMvRm mv=new NNUMvRm();
+      	mv.src=src;
+      	mv.dst=dst;
+        syncer.onUpdate(NNUpdateInfo.NNU_MVRM, mv);
+      }
       return true;
     }
     return false;
@@ -1764,7 +1844,16 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
       checkPermission(src, false, null, FsAction.WRITE, null, FsAction.ALL);
     }
 
-    return dir.delete(src) != null;
+    if (dir.delete(src) == null)
+    	return false;
+    else if(syncAgent.shouldRecordUpdate && this.syncAgent instanceof NNSyncMaster){
+      	NNSyncMaster syncer=(NNSyncMaster)this.syncAgent;
+      	NNUMvRm rm=new NNUMvRm();
+      	rm.src=src;
+      	rm.dst="";
+        syncer.onUpdate(NNUpdateInfo.NNU_MVRM, rm);
+    }
+    return true;
   }
 
   void removePathAndBlocks(String src, List<Block> blocks) throws IOException {
@@ -1833,9 +1922,15 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
     // create multiple inodes.
     checkFsObjectLimit();
 
-    if (!dir.mkdirs(src, permissions, false, now())) {
+    long timestamp=now();
+    if (!dir.mkdirs(src, permissions, false, timestamp)) {
       throw new IOException("Invalid directory name: " + src);
     }
+    if(syncAgent.shouldRecordUpdate && this.syncAgent instanceof NNSyncMaster){
+      	NNSyncMaster syncer=(NNSyncMaster)this.syncAgent;
+        syncer.onUpdate(NNUpdateInfo.NNU_MKDIR, new NNUMkdirs(src,timestamp,permissions));
+    }
+
     return true;
   }
 
@@ -2039,6 +2134,12 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
     if (isInSafeMode())
       throw new SafeModeException("Cannot renew lease for " + holder, safeMode);
     leaseManager.renewLease(holder);
+    
+    if(syncAgent.shouldRecordUpdate && this.syncAgent instanceof NNSyncMaster){
+      	NNSyncMaster syncer=(NNSyncMaster)this.syncAgent;
+        syncer.onUpdate(NNUpdateInfo.NNU_LEASE, new NNUpdateLease(holder));
+    }
+
   }
 
   /**
