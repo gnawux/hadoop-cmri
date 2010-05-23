@@ -48,7 +48,7 @@ class FSDirectory implements FSConstants, Closeable {
   final FSNamesystem namesystem;
   final INodeDirectoryWithQuota rootDir;
   FSImage fsImage;  
-  private boolean ready = false;
+  boolean ready = false;
   // Metrics record
   private MetricsRecord directoryMetrics = null;
 
