@@ -342,18 +342,20 @@ class DataBlockScanner implements Runnable {
   private void handleScanFailure(Block block) {
     
     LOG.info("Reporting bad block " + block + " to namenode.");
-    
-    try {
-      DatanodeInfo[] dnArr = { new DatanodeInfo(datanode.dnRegistration) };
-      LocatedBlock[] blocks = { new LocatedBlock(block, dnArr) }; 
-      datanode.namenode.reportBadBlocks(blocks);
-    } catch (IOException e){
-      /* One common reason is that NameNode could be in safe mode.
-       * Should we keep on retrying in that case?
-       */
-      LOG.warn("Failed to report bad block " + block + " to namenode : " +
-               " Exception : " + StringUtils.stringifyException(e));
-    }
+    int retryCount=0;
+    do{
+  	  try{
+  	      DatanodeInfo[] dnArr = { new DatanodeInfo(datanode.dnRegistration) };
+  	      LocatedBlock[] blocks = { new LocatedBlock(block, dnArr) }; 
+  	      datanode.requestnn().reportBadBlocks(blocks);
+  		  break;
+  	  }catch(IOException ie){
+  		 LOG.warn("Failed to report bad block " + block + " to namenode : " +
+                 " Exception : " + StringUtils.stringifyException(ie) + "retry... " + retryCount ); 
+  	  }
+    }while(++retryCount<DataNode.MAX_RETRY);
+    //do not throw even retry failed
+
   }
   
   static private class LogEntry {

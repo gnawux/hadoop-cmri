@@ -89,7 +89,20 @@ class UpgradeManagerDatanode extends UpgradeManager {
           "UpgradeManagerDatanode.currentUpgrades is not null.";
         assert upgradeDaemon == null : 
           "UpgradeManagerDatanode.upgradeDaemon is not null.";
-        dataNode.namenode.processUpgradeCommand(broadcastCommand);
+        int retryCount=0;
+        do{
+      	  try{
+      		dataNode.requestnn().processUpgradeCommand(broadcastCommand);
+      		  break;
+      	  }catch(IOException ie){
+      		 DataNode.LOG.warn("Exception while sendHB, retrying " + retryCount,ie); 
+      	  }
+        }while(++retryCount<DataNode.MAX_RETRY);
+        
+        if( retryCount >= DataNode.MAX_RETRY ){
+      	  throw new IOException("retry timeout");
+        }
+
         return true;
       }
     }

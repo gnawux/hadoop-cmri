@@ -204,16 +204,21 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
 
       if (!checksum.compare(checksumBuf, checksumOff)) {
         if (srcDataNode != null) {
-          try {
-            LOG.info("report corrupt block " + block + " from datanode " +
-                      srcDataNode + " to namenode");
-            LocatedBlock lb = new LocatedBlock(block, 
-                                            new DatanodeInfo[] {srcDataNode});
-            datanode.namenode.reportBadBlocks(new LocatedBlock[] {lb});
-          } catch (IOException e) {
-            LOG.warn("Failed to report bad block " + block + 
-                      " from datanode " + srcDataNode + " to namenode");
-          }
+  	      int retryCount=0;
+	      do{
+	    	  try{
+	    		  LOG.info("report corrupt block " + block + " from datanode " +
+	                            srcDataNode + " to namenode");
+	               LocatedBlock lb = new LocatedBlock(block, 
+	                                                  new DatanodeInfo[] {srcDataNode});
+	               datanode.requestnn().reportBadBlocks(new LocatedBlock[] {lb});
+	               break;
+	          }catch(IOException ie){
+	        	  LOG.warn("Failed to report bad block " + block + 
+	                            " from datanode " + srcDataNode + " to namenode, retry... " + retryCount, ie);
+	          }
+	      }while(++retryCount<DataNode.MAX_RETRY);
+            //do not throw even if failed
         }
         throw new IOException("Unexpected checksum mismatch " + 
                               "while writing " + block + " from " + inAddr);

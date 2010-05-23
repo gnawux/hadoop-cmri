@@ -84,13 +84,19 @@ public abstract class UpgradeObjectDatanode extends UpgradeObject implements Run
             + "\n   " + getDescription() + "."
             + " Name-node version = " + nsInfo.getLayoutVersion() + ".";
     DataNode.LOG.fatal( errorMsg );
-    try {
-      dataNode.namenode.errorReport(dataNode.dnRegistration,
-                                    DatanodeProtocol.NOTIFY, errorMsg);
-    } catch(SocketTimeoutException e) {  // namenode is busy
-      DataNode.LOG.info("Problem connecting to server: " 
-                        + dataNode.getNameNodeAddr());
-    }
+    int retryCount=0;
+    do{
+  	  try{
+  	      dataNode.requestnn().errorReport(dataNode.dnRegistration,
+                  DatanodeProtocol.NOTIFY, errorMsg);
+  		  break;
+  	  }catch(IOException ie){
+  	      DataNode.LOG.info("Problem connecting to server: " 
+                  + dataNode.getNameNodeAddr() + "retry... " + retryCount, ie ); 
+  	  }
+    }while(++retryCount<DataNode.MAX_RETRY);
+    //do not throw even retry failed
+
     throw new IOException(errorMsg);
   }
 
