@@ -386,6 +386,11 @@ public class LeaseManager {
       for(String p : removing) {
         removeLease(oldest, p);
       }
+      
+      if(fsnamesystem.syncAgent.shouldRecordUpdate && fsnamesystem.syncAgent instanceof NNSyncMaster){
+        	NNSyncMaster syncer=(NNSyncMaster)fsnamesystem.syncAgent;
+  			syncer.onUpdate(NNUpdateInfo.NNU_LEASE, new NNUpdateLease(oldest.holder,false));
+      }
     }
   }
 
