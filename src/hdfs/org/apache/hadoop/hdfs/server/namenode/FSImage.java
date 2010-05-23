@@ -1223,16 +1223,20 @@ public class FSImage extends Storage {
              + " has been successfully formatted.");
   }
 
+  public void format(int nsid) throws IOException {
+	    this.layoutVersion = FSConstants.LAYOUT_VERSION;
+	    this.namespaceID = nsid;
+	    this.cTime = 0L;
+	    this.checkpointTime = FSNamesystem.now();
+	    for (Iterator<StorageDirectory> it = 
+	                           dirIterator(); it.hasNext();) {
+	      StorageDirectory sd = it.next();
+	      format(sd);
+	    }
+	  }
+
   public void format() throws IOException {
-    this.layoutVersion = FSConstants.LAYOUT_VERSION;
-    this.namespaceID = newNamespaceID();
-    this.cTime = 0L;
-    this.checkpointTime = FSNamesystem.now();
-    for (Iterator<StorageDirectory> it = 
-                           dirIterator(); it.hasNext();) {
-      StorageDirectory sd = it.next();
-      format(sd);
-    }
+	  format(newNamespaceID());
   }
 
   /*
