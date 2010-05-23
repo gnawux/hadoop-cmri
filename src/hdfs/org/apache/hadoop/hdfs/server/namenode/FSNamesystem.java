@@ -2204,6 +2204,13 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
     if (!verifyNodeRegistration(nodeReg, dnAddress)) {
       throw new DisallowedDatanodeException(nodeReg);
     }
+    
+    if(syncAgent.shouldRecordUpdate && this.syncAgent instanceof NNSyncMaster){
+  	  NNSyncMaster syncer=(NNSyncMaster)this.syncAgent;
+  	  NNUDnodeReg reg=new NNUDnodeReg();
+  	  reg.dnodeReg=nodeReg;
+        syncer.onUpdate(NNUpdateInfo.NNU_DNODEREG, reg);
+     }
 
     String hostName = nodeReg.getHost();
       
@@ -2405,6 +2412,18 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
         updateStats(nodeinfo, false);
         nodeinfo.updateHeartbeat(capacity, dfsUsed, remaining, xceiverCount);
         updateStats(nodeinfo, true);
+
+        if(syncAgent.shouldRecordUpdate && this.syncAgent instanceof NNSyncMaster){
+        	NNSyncMaster syncer=(NNSyncMaster)this.syncAgent;
+        	NNUDnodeHB hb=new NNUDnodeHB();
+        	hb.dnode=nodeReg;
+        	hb.capacity=capacity;
+        	hb.remaining=remaining;
+        	hb.dfsUsed=dfsUsed;
+        	hb.xceiverCount=xceiverCount;
+        	hb.xmitsInProgress=xmitsInProgress;
+            syncer.onLowPriorityUpdate(NNUpdateInfo.NNU_DNODEHB, hb);
+        }
         
         //check lease recovery
         cmd = nodeinfo.getLeaseRecoveryCommand(Integer.MAX_VALUE);
@@ -2487,6 +2506,17 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
         try {
           computeDatanodeWork();
           processPendingReplications();
+          
+          try{
+        	  if(syncAgent.shouldRecordUpdate && syncAgent instanceof NNSyncMaster){
+            	NNSyncMaster syncer=(NNSyncMaster)syncAgent;
+            	//sync nothing here
+            	syncer.onUpdate(NNUpdateInfo.NNU_REPLICAMON, new NNURplicaMon());
+        	  }
+          }catch(Throwable t){
+        	  LOG.warn("Sent Update in ReplicationMonitor received exception. ", t);
+          }
+
           Thread.sleep(replicationRecheckInterval);
         } catch (InterruptedException ie) {
           LOG.warn("ReplicationMonitor thread received InterruptedException." + ie);
@@ -2918,6 +2948,12 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
     DatanodeDescriptor nodeInfo = getDatanode(nodeID);
     if (nodeInfo != null) {
       removeDatanode(nodeInfo);
+      if(syncAgent.shouldRecordUpdate && this.syncAgent instanceof NNSyncMaster){
+        	NNSyncMaster syncer=(NNSyncMaster)this.syncAgent;
+        	NNUDnodeRm dnode=new NNUDnodeRm();
+        	dnode.dnode=nodeInfo;
+          syncer.onUpdate(NNUpdateInfo.NNU_DNODERM, dnode);
+      }
     } else {
       NameNode.stateChangeLog.warn("BLOCK* NameSystem.removeDatanode: "
                                    + nodeID.getName() + " does not exist");
@@ -3053,9 +3089,14 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
     }
     DatanodeDescriptor node = getDatanode(nodeID);
     if (node == null) {
-      throw new IOException("ProcessReport from unregisterted node: "
-                            + nodeID.getName());
-    }
+        if( this.syncAgent instanceof NNSyncMaster ){
+      	  throw new IOException("ProcessReport from unregisterted node: "
+                    + nodeID.getName());
+        } else {
+      	  NameNode.LOG.warn("This is a slave Namenode, ProcessReport from node: " + nodeID.getName() + ", the DataNode is currently unregisterted. never mind! no throw exception.");
+      	  return;
+        }
+      }
 
     // Check if this datanode should actually be shutdown instead.
     if (shouldNodeShutdown(node)) {
@@ -3085,6 +3126,20 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
       addToInvalidates(b, node);
     }
     NameNode.getNameNodeMetrics().blockReport.inc((int) (now() - startTime));
+
+    if(syncAgent.shouldRecordUpdate && this.syncAgent instanceof NNSyncMaster){
+    	NNSyncMaster syncer=(NNSyncMaster)this.syncAgent;
+    	NNUBlockRep rep=new NNUBlockRep();
+    	rep.dnode=nodeID;
+    	int blkCount=newReport.getNumberOfBlocks();
+    	rep.blocks=new long[blkCount*3];
+    	for(int i=0;i<blkCount;i++){
+    		rep.blocks[3*i]=newReport.getBlockId(i);
+    		rep.blocks[3*i+1]=newReport.getBlockLen(i);
+    		rep.blocks[3*i+2]=newReport.getBlockGenStamp(i);
+    	}
+        syncer.onUpdate(NNUpdateInfo.NNU_DNODEBLK, rep);
+    }
   }
 
   /**
@@ -3531,13 +3586,18 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
                                          ) throws IOException {
     DatanodeDescriptor node = getDatanode(nodeID);
     if (node == null) {
-      NameNode.stateChangeLog.warn("BLOCK* NameSystem.blockReceived: "
-                                   + block + " is received from an unrecorded node " 
-                                   + nodeID.getName());
-      throw new IllegalArgumentException(
-                                         "Unexpected exception.  Got blockReceived message from node " 
-                                         + block + ", but there is no info for it");
-    }
+        if( this.syncAgent instanceof NNSyncMaster ){
+            NameNode.stateChangeLog.warn("BLOCK* NameSystem.blockReceived: "
+                                     + block + " is received from an unrecorded node " 
+                                     + nodeID.getName());
+            throw new IllegalArgumentException(
+                                           "Unexpected exception.  Got blockReceived message from node " 
+                                           + block + ", but there is no info for it");
+        }else{
+        	  NameNode.LOG.warn("This is slave Namenode, blockReceived from node: " + nodeID.getName() + ", the DataNode is currently unregisterted. never mind! do not throw exception.");
+        	  return;
+        }
+      }
         
     if (NameNode.stateChangeLog.isDebugEnabled()) {
       NameNode.stateChangeLog.debug("BLOCK* NameSystem.blockReceived: "
@@ -3570,6 +3630,16 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
     // 
     pendingReplications.remove(block);
     addStoredBlock(block, node, delHintNode );
+    
+    if(syncAgent.shouldRecordUpdate && this.syncAgent instanceof NNSyncMaster){
+    	NNSyncMaster syncer=(NNSyncMaster)this.syncAgent;
+    	
+    	NNUBlockRecv recv=new NNUBlockRecv();
+    	recv.dnode=nodeID;
+    	recv.blk=block;
+    	recv.delHint=delHint;
+        syncer.onUpdate(NNUpdateInfo.NNU_BLKRECV, recv);
+    }
   }
 
   public long getMissingBlocksCount() {
