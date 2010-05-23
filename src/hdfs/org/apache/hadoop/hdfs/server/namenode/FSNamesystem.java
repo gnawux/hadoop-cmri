@@ -136,6 +136,12 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
   volatile long scheduledReplicationBlocksCount = 0L;
   volatile long excessBlocksCount = 0L;
   volatile long pendingDeletionBlocksCount = 0L;
+
+  //
+  // Manages the synchronization between NameNodes
+  //
+  NNSyncer syncAgent;
+
   //
   // Stores the correct file name hierarchy
   //
@@ -287,65 +293,121 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
   /**
    * FSNamesystem constructor.
    */
-  FSNamesystem(NameNode nn, Configuration conf) throws IOException {
-    try {
-      initialize(nn, conf);
-    } catch(IOException e) {
-      LOG.error(getClass().getSimpleName() + " initialization failed.", e);
-      close();
-      throw e;
-    }
+  FSNamesystem(NameNode nn, Configuration conf, boolean runAsMaster) throws IOException {
+	    try {
+	      initialize(nn, conf, runAsMaster);
+	    } catch(IOException e) {
+	      LOG.error(getClass().getSimpleName() + " initialization failed.", e);
+	      close();
+	      throw e;
+	    }
   }
 
   /**
    * Initialize FSNamesystem.
    */
-  private void initialize(NameNode nn, Configuration conf) throws IOException {
-    this.systemStart = now();
-    setConfigurationParameters(conf);
+  private void initialize(NameNode nn, Configuration conf, boolean runAsMaster) throws IOException {
+	    this.systemStart = now();
+	    setConfigurationParameters(conf);
 
-    this.nameNodeAddress = nn.getNameNodeAddress();
-    this.registerMBean(conf); // register the MBean for the FSNamesystemStutus
-    this.dir = new FSDirectory(this, conf);
-    StartupOption startOpt = NameNode.getStartupOption(conf);
-    this.dir.loadFSImage(getNamespaceDirs(conf),
-                         getNamespaceEditsDirs(conf), startOpt);
-    long timeTakenToLoadFSImage = now() - systemStart;
-    LOG.info("Finished loading FSImage in " + timeTakenToLoadFSImage + " msecs");
-    NameNode.getNameNodeMetrics().fsImageLoadTime.set(
-                              (int) timeTakenToLoadFSImage);
-    this.safeMode = new SafeModeInfo(conf);
-    setBlockTotal();
-    pendingReplications = new PendingReplicationBlocks(
-                            conf.getInt("dfs.replication.pending.timeout.sec", 
-                                        -1) * 1000L);
-    this.hbthread = new Daemon(new HeartbeatMonitor());
-    this.lmthread = new Daemon(leaseManager.new Monitor());
-    this.replthread = new Daemon(new ReplicationMonitor());
-    hbthread.start();
-    lmthread.start();
-    replthread.start();
+	    this.nameNodeAddress = nn.getNameNodeAddress();
+	    this.registerMBean(conf); // register the MBean for the FSNamesystemStutus
+	    this.dir = new FSDirectory(this, conf);
 
-    this.hostsReader = new HostsFileReader(conf.get("dfs.hosts",""),
-                                           conf.get("dfs.hosts.exclude",""));
-    this.dnthread = new Daemon(new DecommissionManager(this).new Monitor(
-        conf.getInt("dfs.namenode.decommission.interval", 30),
-        conf.getInt("dfs.namenode.decommission.nodes.per.interval", 5)));
-    dnthread.start();
-
-    this.dnsToSwitchMapping = ReflectionUtils.newInstance(
-        conf.getClass("topology.node.switch.mapping.impl", ScriptBasedMapping.class,
-            DNSToSwitchMapping.class), conf);
-    
-    /* If the dns to swith mapping supports cache, resolve network 
-     * locations of those hosts in the include list, 
-     * and store the mapping in the cache; so future calls to resolve
-     * will be fast.
-     */
-    if (dnsToSwitchMapping instanceof CachedDNSToSwitchMapping) {
-      dnsToSwitchMapping.resolve(new ArrayList<String>(hostsReader.getHosts()));
-    }
+	    this.hostsReader = new HostsFileReader(conf.get("dfs.hosts",""),
+	            conf.get("dfs.hosts.exclude",""));
+	    
+	    if(runAsMaster){
+	    	initializeAsMaster(nn,conf);
+	    }else{//slave
+	    	initializeAsSlave(nn,conf);
+	    }
+	    
+	    this.dnsToSwitchMapping = ReflectionUtils.newInstance(
+	            conf.getClass("topology.node.switch.mapping.impl", ScriptBasedMapping.class,
+	                DNSToSwitchMapping.class), conf);
+	        
+	    /* If the dns to swith mapping supports cache, resolve network 
+	     * locations of those hosts in the include list, 
+	     * and store the mapping in the cache; so future calls to resolve
+	     * will be fast.
+	     */
+	    if (dnsToSwitchMapping instanceof CachedDNSToSwitchMapping) {
+	      dnsToSwitchMapping.resolve(new ArrayList<String>(hostsReader.getHosts()));
+	    }
   }
+  
+  private void initializeAsMaster(NameNode nn, Configuration conf) throws IOException{
+	    
+	    StartupOption startOpt = NameNode.getStartupOption(conf);
+	    this.dir.loadFSImage(getNamespaceDirs(conf),
+	                         getNamespaceEditsDirs(conf), startOpt);
+	    long timeTakenToLoadFSImage = now() - systemStart;
+	    LOG.info("Finished loading FSImage in " + timeTakenToLoadFSImage + " msecs");
+	    NameNode.getNameNodeMetrics().fsImageLoadTime.set(
+	                              (int) timeTakenToLoadFSImage);
+	    this.safeMode = new SafeModeInfo(conf);
+	    setBlockTotal();
+	    
+	    syncAgent = new NNSyncMaster(nn,this,conf);
+	    LOG.info("NNSyncMaster is created.....");
+	    
+	    pendingReplications = new PendingReplicationBlocks(
+	                            conf.getInt("dfs.replication.pending.timeout.sec", 
+	                                        -1) * 1000L);
+	    this.hbthread = new Daemon(new HeartbeatMonitor());
+	    this.lmthread = new Daemon(leaseManager.new Monitor());
+	    this.replthread = new Daemon(new ReplicationMonitor());
+	    hbthread.start();
+	    lmthread.start();
+	    replthread.start();
+
+	    this.dnthread = new Daemon(new DecommissionManager(this).new Monitor(
+	        conf.getInt("dfs.namenode.decommission.interval", 30),
+	        conf.getInt("dfs.namenode.decommission.nodes.per.interval", 5)));
+	    dnthread.start();
+
+  }
+  
+  private void initializeAsSlave(NameNode nn, Configuration conf) throws IOException{
+	  syncAgent = new NNSyncSlave(nn,this,conf);
+	  LOG.info("NNSyncSlave created.....");
+
+	  pendingReplications = new PendingReplicationBlocks(
+            conf.getInt("dfs.replication.pending.timeout.sec", 
+                        -1) * 1000L);
+  }
+
+  public void promote() throws IOException {
+		if (!(syncAgent instanceof NNSyncSlave)) {
+			LOG
+					.info("Trying to promote a namenode, which is originally not slave...");
+			return;
+		}
+
+		LOG.info("now promote!");
+
+		Configuration conf = new Configuration();
+
+		this.hbthread = new Daemon(new HeartbeatMonitor());
+		this.lmthread = new Daemon(leaseManager.new Monitor());
+		this.replthread = new Daemon(new ReplicationMonitor());
+		hbthread.start();
+		lmthread.start();
+		replthread.start();
+
+		this.dnthread = new Daemon(new DecommissionManager(this).new Monitor(
+				conf.getInt("dfs.namenode.decommission.interval", 30), conf
+						.getInt("dfs.namenode.decommission.nodes.per.interval",
+								5)));
+		dnthread.start();
+
+		NNSyncSlave slaveSyncAgent = (NNSyncSlave) syncAgent;
+		syncAgent = new NNSyncMaster(slaveSyncAgent, conf);
+
+		// TODO: I did not do anything about the safe mode, and wonder whether
+		// it is required---wangxu
+	}
 
   public static Collection<File> getNamespaceDirs(Configuration conf) {
     Collection<String> dirNames = conf.getStringCollection("dfs.name.dir");
