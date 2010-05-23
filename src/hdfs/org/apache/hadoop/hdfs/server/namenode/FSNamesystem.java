@@ -2162,6 +2162,18 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean {
     }
     return dir.getListing(src);
   }
+  /***
+   * This method is for slave NameNode, and is used to change a new master NameNode.
+   * @param masterName
+   * @throws IOException
+   */
+  public void newMaster(String masterName) throws IOException{
+	  if(syncAgent instanceof NNSyncSlave){
+		  NNSyncSlave syncer=(NNSyncSlave)syncAgent;
+		  LOG.info("change to new master: "+masterName);
+		  syncer.changeSyncMaster(masterName);
+	  }
+  }
 
   /////////////////////////////////////////////////////////
   //
