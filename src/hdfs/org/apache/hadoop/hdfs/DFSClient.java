@@ -1047,7 +1047,22 @@ public class DFSClient implements FSConstants, java.io.Closeable {
    * @throws IOException
    */ 
   public long getMissingBlocksCount() throws IOException {
-    return namenode.getStats()[ClientProtocol.GET_STATS_MISSING_BLOCKS_IDX];
+	  long blockCount=0L;
+	  int retryCount=0;
+	  do{
+		try{
+		  	  blockCount = requestronn().getStats()[ClientProtocol.GET_STATS_MISSING_BLOCKS_IDX];
+		  break;
+		}catch(IOException ie){
+		  LOG.warn("Exception ... " + retryCount,ie); 
+		}
+	  }while(++retryCount<MAX_RETRY);
+		
+  	  if( retryCount >= MAX_RETRY ){
+	    throw new IOException("Problem getting diskstatus");
+	  }
+
+	  return blockCount;
   }
   
   /**
@@ -1055,7 +1070,22 @@ public class DFSClient implements FSConstants, java.io.Closeable {
    * @throws IOException
    */ 
   public long getUnderReplicatedBlocksCount() throws IOException {
-    return namenode.getStats()[ClientProtocol.GET_STATS_UNDER_REPLICATED_IDX];
+	  long blockCount=0L;
+	  int retryCount=0;
+	  do{
+		try{
+		  	  blockCount = requestronn().getStats()[ClientProtocol.GET_STATS_UNDER_REPLICATED_IDX];
+		  break;
+		}catch(IOException ie){
+		  LOG.warn("Exception ... " + retryCount,ie); 
+		}
+	  }while(++retryCount<MAX_RETRY);
+		
+  	  if( retryCount >= MAX_RETRY ){
+	    throw new IOException("Problem getting diskstatus");
+	  }
+
+	  return blockCount;
   }
   
   /**
@@ -1063,12 +1093,43 @@ public class DFSClient implements FSConstants, java.io.Closeable {
    * @throws IOException
    */ 
   public long getCorruptBlocksCount() throws IOException {
-    return namenode.getStats()[ClientProtocol.GET_STATS_CORRUPT_BLOCKS_IDX];
+	  long blockCount=0L;
+	  int retryCount=0;
+	  do{
+		try{
+		  	  blockCount = requestronn().getStats()[ClientProtocol.GET_STATS_CORRUPT_BLOCKS_IDX];
+		  break;
+		}catch(IOException ie){
+		  LOG.warn("Exception ... " + retryCount,ie); 
+		}
+	  }while(++retryCount<MAX_RETRY);
+		
+  	  if( retryCount >= MAX_RETRY ){
+	    throw new IOException("Problem getting diskstatus");
+	  }
+
+	  return blockCount;
   }
   
   public DatanodeInfo[] datanodeReport(DatanodeReportType type)
   throws IOException {
-    return namenode.getDatanodeReport(type);
+	  DatanodeInfo[] dnReport=null;
+	  int retryCount=0;
+	  do{
+		try{
+			dnReport = requestronn().getDatanodeReport(type);
+		  break;
+		}catch(IOException ie){
+		  LOG.warn("Exception ... " + retryCount,ie); 
+		}
+	  }while(++retryCount<MAX_RETRY);
+		
+  	  if( retryCount >= MAX_RETRY ){
+	    throw new IOException("Problem getting diskstatus");
+	  }
+
+	  return dnReport;
+
   }
     
   /**
@@ -1079,7 +1140,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
    * @see ClientProtocol#setSafeMode(FSConstants.SafeModeAction)
    */
   public boolean setSafeMode(SafeModeAction action) throws IOException {
-    return namenode.setSafeMode(action);
+    return requestrwnn().setSafeMode(action);
   }
 
   /**
@@ -1091,7 +1152,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
    */
   void saveNamespace() throws AccessControlException, IOException {
     try {
-      namenode.saveNamespace();
+    	requestrwnn().saveNamespace();
     } catch(RemoteException re) {
       throw re.unwrapRemoteException(AccessControlException.class);
     }
@@ -1105,7 +1166,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
    * @see ClientProtocol#refreshNodes()
    */
   public void refreshNodes() throws IOException {
-    namenode.refreshNodes();
+	  requestrwnn().refreshNodes();
   }
 
   /**
@@ -1116,14 +1177,14 @@ public class DFSClient implements FSConstants, java.io.Closeable {
    * @see ClientProtocol#metaSave(String)
    */
   public void metaSave(String pathname) throws IOException {
-    namenode.metaSave(pathname);
+	  requestrwnn().metaSave(pathname);
   }
     
   /**
    * @see ClientProtocol#finalizeUpgrade()
    */
   public void finalizeUpgrade() throws IOException {
-    namenode.finalizeUpgrade();
+	  requestrwnn().finalizeUpgrade();
   }
 
   /**
@@ -1131,7 +1192,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
    */
   public UpgradeStatusReport distributedUpgradeProgress(UpgradeAction action
                                                         ) throws IOException {
-    return namenode.distributedUpgradeProgress(action);
+    return requestrwnn().distributedUpgradeProgress(action);
   }
 
   /**
@@ -1158,7 +1219,22 @@ public class DFSClient implements FSConstants, java.io.Closeable {
     FsPermission masked = permission.applyUMask(FsPermission.getUMask(conf));
     LOG.debug(src + ": masked=" + masked);
     try {
-      return namenode.mkdirs(src, masked);
+  	  boolean success = false;
+	  int retryCount = 0;
+	  do{
+		try{
+		  success = requestrwnn().mkdirs(src, masked);
+		  break;
+		}catch(IOException ie){
+		  LOG.warn("Exception ... " + retryCount,ie); 
+		}
+	  }while(++retryCount<MAX_RETRY);
+		
+  	  if( retryCount >= MAX_RETRY ){
+	    throw new IOException("Problem getting diskstatus");
+	  }
+
+    	return success;
     } catch(RemoteException re) {
       throw re.unwrapRemoteException(AccessControlException.class,
                                      NSQuotaExceededException.class,
@@ -1168,7 +1244,22 @@ public class DFSClient implements FSConstants, java.io.Closeable {
 
   ContentSummary getContentSummary(String src) throws IOException {
     try {
-      return namenode.getContentSummary(src);
+      ContentSummary contentSummary=null;
+	  int retryCount=0;
+	  do{
+		  try{
+			  contentSummary=requestronn().getContentSummary(src);
+			  break;
+		  }catch(IOException ie){
+			  LOG.warn("Exception ... " + retryCount,ie); 
+		  }
+	  }while(++retryCount<MAX_RETRY);
+	  
+	  if( retryCount >= MAX_RETRY ){
+	          throw new IOException("Problem getting contentSummary ");
+	  }
+	  
+	  return contentSummary;
     } catch(RemoteException re) {
       throw re.unwrapRemoteException(AccessControlException.class,
                                      FileNotFoundException.class);
@@ -1193,7 +1284,19 @@ public class DFSClient implements FSConstants, java.io.Closeable {
     }
     
     try {
-      namenode.setQuota(src, namespaceQuota, diskspaceQuota);
+	  int retryCount=0;
+	  do{
+		  try{
+			  requestrwnn().setQuota(src, namespaceQuota, diskspaceQuota);
+			  break;
+		  }catch(IOException ie){
+			  LOG.warn("Exception ... " + retryCount,ie); 
+		  }
+	  }while(++retryCount<MAX_RETRY);
+	  
+	  if( retryCount >= MAX_RETRY ){
+	          throw new IOException("Problem getting contentSummary ");
+	  }
     } catch(RemoteException re) {
       throw re.unwrapRemoteException(AccessControlException.class,
                                      FileNotFoundException.class,
@@ -1209,12 +1312,40 @@ public class DFSClient implements FSConstants, java.io.Closeable {
   public void setTimes(String src, long mtime, long atime) throws IOException {
     checkOpen();
     try {
-      namenode.setTimes(src, mtime, atime);
+  	  int retryCount=0;
+	  do{
+		  try{
+			  requestrwnn().setTimes(src, mtime, atime);
+			  break;
+		  }catch(IOException ie){
+			  LOG.warn("Exception ... " + retryCount,ie); 
+		  }
+	  }while(++retryCount<MAX_RETRY);
+	  
+	  if( retryCount >= MAX_RETRY ){
+	          throw new IOException("Problem getting contentSummary ");
+	  }
     } catch(RemoteException re) {
       throw re.unwrapRemoteException(AccessControlException.class,
                                      FileNotFoundException.class);
     }
   }
+  
+  /**
+   * Set the namenode described in arguments as
+   * new master namenode in NNC.
+   * 
+   * @see ClientProtocol#setAsMaster(String)
+   */
+  public int setAsMaster(String master) throws IOException{
+	  requestrwnn().setAsMaster(master);
+	  return 0;
+  }
+  
+  public boolean status(String master) throws IOException{
+	  return requestrwnn().status(master);
+  }
+  
 
   /**
    * Pick the best node from which to stream the data.
@@ -1303,7 +1434,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
           return;
         }
       }
-      namenode.renewLease(clientName);
+      requestrwnn().renewLease(clientName);
     }
 
     /**
@@ -1741,7 +1872,20 @@ public class DFSClient implements FSConstants, java.io.Closeable {
      * Grab the open-file info from namenode
      */
     synchronized void openInfo() throws IOException {
-      LocatedBlocks newInfo = callGetBlockLocations(namenode, src, 0, prefetchSize);
+        LocatedBlocks newInfo = null;
+        int retryCount=0;
+    	  do{
+    		  try{
+    			  newInfo = callGetBlockLocations(requestronn(), src, 0, prefetchSize);
+    			  break;
+    		  }catch(IOException ie){
+    			  LOG.warn("Exception ... " + retryCount,ie); 
+    		  }
+    	  }while(++retryCount<MAX_RETRY);
+    	  
+    	  if( retryCount >= MAX_RETRY ){
+    	          throw new IOException("Problem listing path");
+    	  }
       if (newInfo == null) {
         throw new IOException("Cannot open filename " + src);
       }
@@ -1799,8 +1943,20 @@ public class DFSClient implements FSConstants, java.io.Closeable {
       if (targetBlockIdx < 0) { // block is not cached
         targetBlockIdx = LocatedBlocks.getInsertIndex(targetBlockIdx);
         // fetch more blocks
-        LocatedBlocks newBlocks;
-        newBlocks = callGetBlockLocations(namenode, src, offset, prefetchSize);
+        LocatedBlocks newBlocks=null;
+		int retryCount=0;
+		do{
+			try{
+			    newBlocks = callGetBlockLocations(requestronn(), src, offset, prefetchSize);
+				break;
+			}catch(IOException ie){
+				LOG.warn("Exception ... " + retryCount,ie); 
+			}
+		}while(++retryCount<MAX_RETRY);
+		  
+		if( retryCount >= MAX_RETRY ){
+			throw new IOException("retry timeout");
+		}
         assert (newBlocks != null) : "Could not find target position " + offset;
         locatedBlocks.insertRange(targetBlockIdx, newBlocks.getLocatedBlocks());
       }
@@ -1838,8 +1994,20 @@ public class DFSClient implements FSConstants, java.io.Closeable {
         if(blockIdx < locatedBlocks.locatedBlockCount())
           blk = locatedBlocks.get(blockIdx);
         if (blk == null || curOff < blk.getStartOffset()) {
-          LocatedBlocks newBlocks;
-          newBlocks = callGetBlockLocations(namenode, src, curOff, remaining);
+            LocatedBlocks newBlocks = null;
+    		  int retryCount=0;
+    		  do{
+    			  try{
+    		          newBlocks = callGetBlockLocations(requestronn(), src, curOff, remaining);
+    				  break;
+    			  }catch(IOException ie){
+    				 LOG.warn("Exception ... " + retryCount,ie); 
+    			  }
+    		  }while(++retryCount<MAX_RETRY);
+    		  
+    		  if( retryCount >= MAX_RETRY ){
+    			  throw new IOException("retry timeout");
+    		  }
           locatedBlocks.insertRange(blockIdx, newBlocks.getLocatedBlocks());
           continue;
         }
@@ -2953,8 +3121,20 @@ public class DFSClient implements FSConstants, java.io.Closeable {
       computePacketChunkSize(writePacketSize, bytesPerChecksum);
 
       try {
-        namenode.create(
-            src, masked, clientName, overwrite, replication, blockSize);
+      	  int retryCount=0;
+      	  do{
+      		  try{
+      	    	  requestrwnn().create(
+      	            src, masked, clientName, overwrite, replication, blockSize);
+      			  break;
+      		  }catch(IOException ie){
+      			  LOG.warn("Exception ... " + retryCount,ie); 
+      		  }
+      	  }while(++retryCount<MAX_RETRY);
+      	  
+      	  if( retryCount >= MAX_RETRY ){
+      	          throw new IOException("Problem delete");
+      	  }
       } catch(RemoteException re) {
         throw re.unwrapRemoteException(AccessControlException.class,
                                        NSQuotaExceededException.class,
@@ -3076,7 +3256,19 @@ public class DFSClient implements FSConstants, java.io.Closeable {
 
         if (!success) {
           LOG.info("Abandoning block " + block);
-          namenode.abandonBlock(block, src, clientName);
+      	  int retryCount=0;
+      	  do{
+      		  try{
+      	    	  requestrwnn().abandonBlock(block, src, clientName);
+      			  break;
+      		  }catch(IOException ie){
+      			  LOG.warn("Exception ... " + retryCount,ie); 
+      		  }
+      	  }while(++retryCount<MAX_RETRY);
+      	  
+      	  if( retryCount >= MAX_RETRY ){
+      	          throw new IOException("Problem delete");
+      	  }
 
           // Connection failed.  Let's wait a little bit and retry
           retry = true;
@@ -3183,7 +3375,22 @@ public class DFSClient implements FSConstants, java.io.Closeable {
         long localstart = System.currentTimeMillis();
         while (true) {
           try {
-            return namenode.addBlock(src, clientName);
+        	  LocatedBlock block=null;
+          	  int retryCount=0;
+          	  do{
+          		  try{
+          	    	  block = requestrwnn().addBlock(src, clientName);
+          			  break;
+          		  }catch(IOException ie){
+          			  LOG.warn("Exception ... " + retryCount,ie); 
+          		  }
+          	  }while(++retryCount<MAX_RETRY);
+          	  
+          	  if( retryCount >= MAX_RETRY ){
+          	          throw new IOException("Problem delete");
+          	  }
+
+            return block;
           } catch (RemoteException e) {
             IOException ue = 
               e.unwrapRemoteException(FileNotFoundException.class,
@@ -3355,7 +3562,19 @@ public class DFSClient implements FSConstants, java.io.Closeable {
         // then persist block locations on namenode. 
         //
         if (persistBlocks) {
-          namenode.fsync(src, clientName);
+        	  int retryCount=0;
+          	  do{
+          		  try{
+          	    	  requestrwnn().fsync(src, clientName);
+          			  break;
+          		  }catch(IOException ie){
+          			  LOG.warn("Exception ... " + retryCount,ie); 
+          		  }
+          	  }while(++retryCount<MAX_RETRY);
+          	  
+          	  if( retryCount >= MAX_RETRY ){
+          	          throw new IOException("Problem delete");
+          	  }
           persistBlocks = false;
         }
       } catch (IOException e) {
@@ -3510,7 +3729,19 @@ public class DFSClient implements FSConstants, java.io.Closeable {
         long localstart = System.currentTimeMillis();
         boolean fileComplete = false;
         while (!fileComplete) {
-          fileComplete = namenode.complete(src, clientName);
+      	  int retryCount=0;
+      	  do{
+      		  try{
+      	          fileComplete = requestrwnn().complete(src, clientName);
+      			  break;
+      		  }catch(IOException ie){
+      			  LOG.warn("Exception ... " + retryCount,ie); 
+      		  }
+      	  }while(++retryCount<MAX_RETRY);
+      	  
+      	  if( retryCount >= MAX_RETRY ){
+      	          throw new IOException("Problem delete");
+      	  }
           if (!fileComplete) {
             try {
               Thread.sleep(400);
