@@ -1444,6 +1444,14 @@ public class DFSClient implements FSConstants, java.io.Closeable {
     public void run() {
       long lastRenewed = 0;
       while (clientRunning && !Thread.interrupted()) {
+        try {
+            Thread.sleep(1000);
+          } catch (InterruptedException ie) {
+            if (LOG.isDebugEnabled()) {
+              LOG.debug(this + " is interrupted.", ie);
+            }
+            return;
+        }
         if (System.currentTimeMillis() - lastRenewed > (LEASE_SOFTLIMIT_PERIOD / 2)) {
           try {
             renew();
@@ -1453,14 +1461,6 @@ public class DFSClient implements FSConstants, java.io.Closeable {
           }
         }
 
-        try {
-          Thread.sleep(1000);
-        } catch (InterruptedException ie) {
-          if (LOG.isDebugEnabled()) {
-            LOG.debug(this + " is interrupted.", ie);
-          }
-          return;
-        }
       }
     }
 
