@@ -39,6 +39,10 @@ import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UnixUserGroupInformation;
 import org.apache.hadoop.util.*;
 
+import org.apache.hadoop.hdfs.server.namenode.NNSyncer;
+import org.apache.hadoop.hdfs.zookeeper.DualWayNameNode;
+import org.apache.hadoop.hdfs.zookeeper.RLBNameNode;
+
 import org.apache.commons.logging.*;
 
 import java.io.*;
@@ -68,8 +72,12 @@ public class DFSClient implements FSConstants, java.io.Closeable {
   public static final Log LOG = LogFactory.getLog(DFSClient.class);
   public static final int MAX_BLOCK_ACQUIRE_FAILURES = 3;
   private static final int TCP_WINDOW_SIZE = 128 * 1024; // 128 KB
-  public final ClientProtocol namenode;
-  private final ClientProtocol rpcNamenode;
+
+  public final ClientProtocol specifiedNamenode;
+  final private ClientProtocol specifiedRpcNamenode;
+  private boolean isNNCEnabled;
+  public final DualWayNameNode  dwnn;
+
   final UnixUserGroupInformation ugi;
   volatile boolean clientRunning = true;
   Random r = new Random();
@@ -85,6 +93,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
   private final FileSystem.Statistics stats;
   private int maxBlockAcquireFailures;
     
+  final int MAX_RETRY=10;
  
   public static ClientProtocol createNamenode(Configuration conf) throws IOException {
     return createNamenode(NameNode.getAddress(conf), conf);
@@ -108,30 +117,39 @@ public class DFSClient implements FSConstants, java.io.Closeable {
         NetUtils.getSocketFactory(conf, ClientProtocol.class));
   }
 
+  private static Map<String,RetryPolicy> getMethodNameToPolicyMap(){
+		    RetryPolicy createPolicy = RetryPolicies.retryUpToMaximumCountWithFixedSleep(
+		            5, LEASE_SOFTLIMIT_PERIOD, TimeUnit.MILLISECONDS);
+		        
+		        Map<Class<? extends Exception>,RetryPolicy> remoteExceptionToPolicyMap =
+		          new HashMap<Class<? extends Exception>, RetryPolicy>();
+		        remoteExceptionToPolicyMap.put(AlreadyBeingCreatedException.class, createPolicy);
+	
+		        Map<Class<? extends Exception>,RetryPolicy> exceptionToPolicyMap =
+		          new HashMap<Class<? extends Exception>, RetryPolicy>();
+		        exceptionToPolicyMap.put(RemoteException.class, 
+		            RetryPolicies.retryByRemoteException(
+		                RetryPolicies.TRY_ONCE_THEN_FAIL, remoteExceptionToPolicyMap));
+		        RetryPolicy methodPolicy = RetryPolicies.retryByException(
+		            RetryPolicies.TRY_ONCE_THEN_FAIL, exceptionToPolicyMap);
+		        Map<String,RetryPolicy> methodNameToPolicyMap = new HashMap<String,RetryPolicy>();
+		        
+		        methodNameToPolicyMap.put("create", methodPolicy);
+		        
+		        return methodNameToPolicyMap;
+  }
+	
   private static ClientProtocol createNamenode(ClientProtocol rpcNamenode)
-    throws IOException {
-    RetryPolicy createPolicy = RetryPolicies.retryUpToMaximumCountWithFixedSleep(
-        5, LEASE_SOFTLIMIT_PERIOD, TimeUnit.MILLISECONDS);
-    
-    Map<Class<? extends Exception>,RetryPolicy> remoteExceptionToPolicyMap =
-      new HashMap<Class<? extends Exception>, RetryPolicy>();
-    remoteExceptionToPolicyMap.put(AlreadyBeingCreatedException.class, createPolicy);
-
-    Map<Class<? extends Exception>,RetryPolicy> exceptionToPolicyMap =
-      new HashMap<Class<? extends Exception>, RetryPolicy>();
-    exceptionToPolicyMap.put(RemoteException.class, 
-        RetryPolicies.retryByRemoteException(
-            RetryPolicies.TRY_ONCE_THEN_FAIL, remoteExceptionToPolicyMap));
-    RetryPolicy methodPolicy = RetryPolicies.retryByException(
-        RetryPolicies.TRY_ONCE_THEN_FAIL, exceptionToPolicyMap);
-    Map<String,RetryPolicy> methodNameToPolicyMap = new HashMap<String,RetryPolicy>();
-    
-    methodNameToPolicyMap.put("create", methodPolicy);
-
-    return (ClientProtocol) RetryProxy.create(ClientProtocol.class,
-        rpcNamenode, methodNameToPolicyMap);
+	  throws IOException {
+		
+		Map<String,RetryPolicy> methodNameToPolicyMap = getMethodNameToPolicyMap();
+		
+		return (ClientProtocol) RetryProxy.create(ClientProtocol.class,
+													rpcNamenode, methodNameToPolicyMap);
   }
 
+
+ 
   static ClientDatanodeProtocol createClientDatanodeProtocolProxy (
       DatanodeID datanodeid, Configuration conf) throws IOException {
     InetSocketAddress addr = NetUtils.createSocketAddr(
@@ -179,6 +197,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
     throws IOException {
     this.conf = conf;
     this.stats = stats;
+    this.isNNCEnabled = NNSyncer.isNNCEnabled(conf);
     this.socketTimeout = conf.getInt("dfs.socket.timeout", 
                                      HdfsConstants.READ_TIMEOUT);
     this.datanodeWriteTimeout = conf.getInt("dfs.datanode.socket.write.timeout",
@@ -203,17 +222,50 @@ public class DFSClient implements FSConstants, java.io.Closeable {
     defaultBlockSize = conf.getLong("dfs.block.size", DEFAULT_BLOCK_SIZE);
     defaultReplication = (short) conf.getInt("dfs.replication", 3);
 
-    if (nameNodeAddr != null && rpcNamenode == null) {
-      this.rpcNamenode = createRPCNamenode(nameNodeAddr, conf, ugi);
-      this.namenode = createNamenode(this.rpcNamenode);
-    } else if (nameNodeAddr == null && rpcNamenode != null) {
-      //This case is used for testing.
-      this.namenode = this.rpcNamenode = rpcNamenode;
-    } else {
-      throw new IllegalArgumentException(
-          "Expecting exactly one of nameNodeAddr and rpcNamenode being null: "
-          + "nameNodeAddr=" + nameNodeAddr + ", rpcNamenode=" + rpcNamenode);
-    }
+    if( isNNCEnabled ){
+    	Map<String,RetryPolicy> methodNameToPolicyMap = getMethodNameToPolicyMap();
+    	this.specifiedNamenode = null;
+    	this.specifiedRpcNamenode = null;
+		try{
+			this.dwnn = new RLBNameNode(ClientProtocol.class,ClientProtocol.versionID,
+										conf, ugi, methodNameToPolicyMap);
+		}catch(IOException e){
+			LOG.error("exception while init namenode in dfsclient",e);
+			throw (IOException)(new IOException().initCause(e));
+		}
+	}else{
+	    if (nameNodeAddr != null && rpcNamenode == null) {
+	        this.specifiedRpcNamenode = createRPCNamenode(nameNodeAddr, conf, ugi);
+	        this.specifiedNamenode = createNamenode(this.specifiedRpcNamenode);
+	    } else if (nameNodeAddr == null && rpcNamenode != null) {
+	        //This case is used for testing.
+	        this.specifiedNamenode = this.specifiedRpcNamenode = rpcNamenode;
+	    } else {
+	        throw new IllegalArgumentException(
+	            "Expecting exactly one of nameNodeAddr and rpcNamenode being null: "
+	            + "nameNodeAddr=" + nameNodeAddr + ", rpcNamenode=" + rpcNamenode);
+	    }
+	    
+	    this.dwnn=null;
+	}
+  }
+
+  public ClientProtocol requestrwnn(){
+	  try {
+		return isNNCEnabled?(ClientProtocol)dwnn.namenode():specifiedNamenode;
+	} catch (IOException e) {
+		LOG.error("exception while try to fetch a rw namenode",e);
+		return null;
+	}
+  }
+  
+  public ClientProtocol requestronn(){
+	try {
+		return isNNCEnabled?(ClientProtocol)dwnn.altNameNode():specifiedNamenode;
+	} catch (IOException e) {
+		LOG.error("exception while try to fetch a rw namenode",e);
+		return null;
+	}
   }
 
   static int getMaxBlockAcquireFailures(Configuration conf) {
@@ -242,7 +294,10 @@ public class DFSClient implements FSConstants, java.io.Closeable {
       }
   
       // close connections to the namenode
-      RPC.stopProxy(rpcNamenode);
+      if( specifiedRpcNamenode != null)
+    	  RPC.stopProxy(specifiedRpcNamenode);
+      else
+    	  dwnn.stop();
     }
   }
 
