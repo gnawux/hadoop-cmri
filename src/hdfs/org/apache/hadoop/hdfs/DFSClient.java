@@ -310,20 +310,29 @@ public class DFSClient implements FSConstants, java.io.Closeable {
   }
     
   public long getBlockSize(String f) throws IOException {
-    try {
-      return namenode.getPreferredBlockSize(f);
-    } catch (IOException ie) {
-      LOG.warn("Problem getting block size: " + 
-          StringUtils.stringifyException(ie));
-      throw ie;
-    }
+	long blockSize=0;
+	int retryCount=0;
+	do{
+		try{
+			blockSize=requestronn().getPreferredBlockSize(f);
+				  break;
+		}catch(IOException ie){
+			LOG.warn("Exception ... " + retryCount,ie); 
+		}
+	}while(++retryCount<MAX_RETRY);
+		  
+	if( retryCount >= MAX_RETRY ){
+		throw new IOException("Problem getting block size");
+	}
+  	
+    return blockSize;
   }
 
   /**
    * Report corrupt blocks that were discovered by the client.
    */
   public void reportBadBlocks(LocatedBlock[] blocks) throws IOException {
-    namenode.reportBadBlocks(blocks);
+	requestrwnn().reportBadBlocks(blocks);
   }
   
   public short getDefaultReplication() {
@@ -385,7 +394,21 @@ public class DFSClient implements FSConstants, java.io.Closeable {
    */
   public BlockLocation[] getBlockLocations(String src, long start, 
     long length) throws IOException {
-    LocatedBlocks blocks = callGetBlockLocations(namenode, src, start, length);
+	LocatedBlocks blocks=null;
+	int retryCount=0;
+	do{
+		try{
+			blocks = callGetBlockLocations(requestrwnn(), src, start, length);
+			break;
+		}catch(IOException ie){
+			LOG.warn("Exception ... " + retryCount,ie); 
+		}
+	}while(++retryCount<MAX_RETRY);
+		  
+	if( retryCount >= MAX_RETRY ){
+		throw new IOException("Problem locate blocks");
+	}
+	
     if (blocks == null) {
       return new BlockLocation[0];
     }
@@ -568,13 +591,26 @@ public class DFSClient implements FSConstants, java.io.Closeable {
     LocatedBlock lastBlock = null;
     try {
       stat = getFileInfo(src);
-      lastBlock = namenode.append(src, clientName);
+	  int retryCount=0;
+	  do{
+		  try{
+			  lastBlock = requestrwnn().append(src, clientName);
+			  break;
+		  }catch(IOException ie){
+			  LOG.warn("Exception ... " + retryCount,ie); 
+		  }
+	  }while(++retryCount<MAX_RETRY);
+	  
+	  if( retryCount >= MAX_RETRY ){
+	          throw new IOException("Problem append");
+	  }
     } catch(RemoteException re) {
       throw re.unwrapRemoteException(FileNotFoundException.class,
                                      AccessControlException.class,
                                      NSQuotaExceededException.class,
                                      DSQuotaExceededException.class);
     }
+
     OutputStream result = new DFSOutputStream(src, buffersize, progress,
         lastBlock, stat, conf.getInt("io.bytes.per.checksum", 512));
     leasechecker.put(src, result);
@@ -593,7 +629,7 @@ public class DFSClient implements FSConstants, java.io.Closeable {
                                 short replication
                                 ) throws IOException {
     try {
-      return namenode.setReplication(src, replication);
+      return requestrwnn().setReplication(src, replication);
     } catch(RemoteException re) {
       throw re.unwrapRemoteException(AccessControlException.class,
                                      NSQuotaExceededException.class,
@@ -607,13 +643,28 @@ public class DFSClient implements FSConstants, java.io.Closeable {
    */
   public boolean rename(String src, String dst) throws IOException {
     checkOpen();
+	boolean ret=false;
     try {
-      return namenode.rename(src, dst);
+   	  int retryCount=0;
+	  do{
+		  try{
+			ret=requestrwnn().rename(src, dst);
+		    break;
+		  }catch(IOException ie){
+			  LOG.warn("Exception while rename file, retrying... " + retryCount,ie); 
+		  }
+	  }while(++retryCount<MAX_RETRY);
+	  
+	  if( retryCount >= MAX_RETRY ){
+	          throw new IOException("Problem rename file " + src + " to " + dst + " .");
+	  }
     } catch(RemoteException re) {
       throw re.unwrapRemoteException(AccessControlException.class,
                                      NSQuotaExceededException.class,
                                      DSQuotaExceededException.class);
     }
+
+    return ret;
   }
 
   /**
@@ -623,7 +674,22 @@ public class DFSClient implements FSConstants, java.io.Closeable {
   @Deprecated
   public boolean delete(String src) throws IOException {
     checkOpen();
-    return namenode.delete(src, true);
+    boolean success=false;
+	int retryCount=0;
+	do{
+	 try{
+	  success = requestrwnn().delete(src, true);
+	  break;
+	 }catch(IOException ie){
+	  LOG.warn("Exception ... " + retryCount,ie); 
+	 }
+	}while(++retryCount<MAX_RETRY);
+	
+    if( retryCount >= MAX_RETRY ){
+      throw new IOException("Problem delete");
+    }
+
+    return success;
   }
 
   /**
@@ -634,7 +700,21 @@ public class DFSClient implements FSConstants, java.io.Closeable {
   public boolean delete(String src, boolean recursive) throws IOException {
     checkOpen();
     try {
-      return namenode.delete(src, recursive);
+        boolean success=false;
+    	  int retryCount=0;
+    	  do{
+    		  try{
+    			  success = requestrwnn().delete(src, recursive);
+    			  break;
+    		  }catch(IOException ie){
+    			  LOG.warn("Exception ... " + retryCount,ie); 
+    		  }
+    	  }while(++retryCount<MAX_RETRY);
+    	  
+    	  if( retryCount >= MAX_RETRY ){
+    	          throw new IOException("Problem delete");
+    	  }
+    	  return success;
     } catch(RemoteException re) {
       throw re.unwrapRemoteException(AccessControlException.class);
     }
@@ -662,7 +742,22 @@ public class DFSClient implements FSConstants, java.io.Closeable {
   public FileStatus[] listPaths(String src) throws IOException {
     checkOpen();
     try {
-      return namenode.getListing(src);
+   	  FileStatus[] list=null;
+  	  int retryCount=0;
+  	  do{
+  		  try{
+  			  list = requestronn().getListing(src);
+  			  break;
+  		  }catch(IOException ie){
+  			  LOG.warn("Exception ... " + retryCount,ie); 
+  		  }
+  	  }while(++retryCount<MAX_RETRY);
+  	  
+  	  if( retryCount >= MAX_RETRY ){
+  	          throw new IOException("Problem listing path");
+  	  }
+
+  	  return list;
     } catch(RemoteException re) {
       throw re.unwrapRemoteException(AccessControlException.class);
     }
@@ -671,7 +766,22 @@ public class DFSClient implements FSConstants, java.io.Closeable {
   public FileStatus getFileInfo(String src) throws IOException {
     checkOpen();
     try {
-      return namenode.getFileInfo(src);
+      FileStatus fileStatus=null;
+      int retryCount=0;
+  	  do{
+  	    try{
+  		  fileStatus = requestronn().getFileInfo(src);
+  	      break;
+  	    }catch(IOException ie){
+  	      LOG.warn("Exception ... " + retryCount,ie); 
+  	    }
+  	  }while(++retryCount<MAX_RETRY);
+  	  
+  	  if( retryCount >= MAX_RETRY ){
+  	    throw new IOException("Problem getting filestatus");
+  	  }
+  	  
+      return fileStatus;
     } catch(RemoteException re) {
       throw re.unwrapRemoteException(AccessControlException.class);
     }
@@ -685,7 +795,22 @@ public class DFSClient implements FSConstants, java.io.Closeable {
    */
   MD5MD5CRC32FileChecksum getFileChecksum(String src) throws IOException {
     checkOpen();
-    return getFileChecksum(src, namenode, socketFactory, socketTimeout);    
+    MD5MD5CRC32FileChecksum checksum=null;
+	  int retryCount=0;
+	  do{
+		  try{
+			  checksum = getFileChecksum(src, requestronn(), socketFactory, socketTimeout);
+			  break;
+		  }catch(IOException ie){
+			  LOG.warn("Exception ... " + retryCount,ie); 
+		  }
+	  }while(++retryCount<MAX_RETRY);
+	  
+	  if( retryCount >= MAX_RETRY ){
+	          throw new IOException("Problem getting checksum");
+	  }
+
+    return checksum;    
   }
 
   /**
@@ -807,7 +932,19 @@ public class DFSClient implements FSConstants, java.io.Closeable {
                             ) throws IOException {
     checkOpen();
     try {
-      namenode.setPermission(src, permission);
+	  int retryCount=0;
+	  do{
+		  try{
+			  requestrwnn().setPermission(src, permission);
+			  break;
+		  }catch(IOException ie){
+			  LOG.warn("Exception ... " + retryCount,ie); 
+		  }
+	  }while(++retryCount<MAX_RETRY);
+	  
+	  if( retryCount >= MAX_RETRY ){
+	          throw new IOException("Problem setting permission");
+	  }
     } catch(RemoteException re) {
       throw re.unwrapRemoteException(AccessControlException.class,
                                      FileNotFoundException.class);
@@ -825,7 +962,20 @@ public class DFSClient implements FSConstants, java.io.Closeable {
                       ) throws IOException {
     checkOpen();
     try {
-      namenode.setOwner(src, username, groupname);
+	  int retryCount=0;
+	  do{
+		  try{
+			  requestrwnn().setOwner(src, username, groupname);
+			  break;
+		  }catch(IOException ie){
+			  LOG.warn("Exception ... " + retryCount,ie); 
+		  }
+	  }while(++retryCount<MAX_RETRY);
+	  
+	  if( retryCount >= MAX_RETRY ){
+	          throw new IOException("Problem setting owner");
+	  }
+
     } catch(RemoteException re) {
       throw re.unwrapRemoteException(AccessControlException.class,
                                      FileNotFoundException.class);
@@ -833,20 +983,61 @@ public class DFSClient implements FSConstants, java.io.Closeable {
   }
 
   public DiskStatus getDiskStatus() throws IOException {
-    long rawNums[] = namenode.getStats();
+	long rawNums[] = null;
+	int retryCount=0;
+	do{
+	    try{
+	  	  rawNums = requestronn().getStats();
+	  	  break;
+	    }catch(IOException ie){
+	  	  LOG.warn("Exception ... " + retryCount,ie); 
+	    }
+	}while(++retryCount<MAX_RETRY);
+	
+	if( retryCount >= MAX_RETRY ){
+	        throw new IOException("Problem getting diskstatus");
+	}
     return new DiskStatus(rawNums[0], rawNums[1], rawNums[2]);
   }
   /**
    */
   public long totalRawCapacity() throws IOException {
-    long rawNums[] = namenode.getStats();
+	long rawNums[] = null;
+	int retryCount=0;
+	do{
+	    try{
+	  	  rawNums = requestronn().getStats();
+	  	  break;
+	    }catch(IOException ie){
+	  	  LOG.warn("Exception ... " + retryCount,ie); 
+	    }
+	}while(++retryCount<MAX_RETRY);
+	
+	if( retryCount >= MAX_RETRY ){
+	        throw new IOException("Problem getting diskstatus");
+	}
+
     return rawNums[0];
   }
 
   /**
    */
   public long totalRawUsed() throws IOException {
-    long rawNums[] = namenode.getStats();
+    long rawNums[] = null;
+	int retryCount=0;
+	do{
+	    try{
+	  	  rawNums = requestronn().getStats();
+	  	  break;
+	    }catch(IOException ie){
+	  	  LOG.warn("Exception ... " + retryCount,ie); 
+	    }
+	}while(++retryCount<MAX_RETRY);
+	
+	if( retryCount >= MAX_RETRY ){
+	        throw new IOException("Problem getting diskstatus");
+	}
+
     return rawNums[1];
   }
 
