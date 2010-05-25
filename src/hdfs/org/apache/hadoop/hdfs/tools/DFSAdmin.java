@@ -44,6 +44,10 @@ import org.apache.hadoop.security.authorize.RefreshAuthorizationPolicyProtocol;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.ToolRunner;
 
+import org.apache.hadoop.hdfs.DFSClient;
+import org.apache.hadoop.hdfs.server.namenode.NNSyncer;
+import org.apache.hadoop.hdfs.zookeeper.NNKeeper;
+
 /**
  * This class provides some DFS administrative access.
  */
@@ -680,6 +684,13 @@ public class DFSAdmin extends FsShell {
     } else if ("-refreshServiceAcl".equals(cmd)) {
       System.err.println("Usage: java DFSAdmin"
                          + " [-refreshServiceAcl]");
+    } else if ( "-status".equals(cmd) ) {
+      System.err.println("Usage: java DFSAdmin"
+                         + "[-status host:port]");
+
+    } else if ( "-setasmaster".equals(cmd) ) {
+        System.err.println("Usage: java DFSAdmin"
+                         + "[-setasmaster host:port]");
     } else {
       System.err.println("Usage: java DFSAdmin");
       System.err.println("           [-report]");
@@ -694,6 +705,8 @@ public class DFSAdmin extends FsShell {
       System.err.println("           ["+ClearQuotaCommand.USAGE+"]");
       System.err.println("           ["+SetSpaceQuotaCommand.USAGE+"]");
       System.err.println("           ["+ClearSpaceQuotaCommand.USAGE+"]");      
+      System.err.println("           [-status host:port]");
+      System.err.println("           [-setasmaster host:port]");
       System.err.println("           [-help [cmd]]");
       System.err.println();
       ToolRunner.printGenericCommandUsage(System.err);
@@ -760,6 +773,16 @@ public class DFSAdmin extends FsShell {
         printUsage(cmd);
         return exitCode;
       }
+    } else if ( "-status".equals(cmd) ) {
+      if ( argv.length != 2) {
+        printUsage(cmd);
+        return exitCode;
+      }
+    } else if ( "-setasmaster".equals(cmd) ) {
+      if ( argv.length != 2) {
+        printUsage(cmd);
+        return exitCode;
+      }
     }
     
     // initialize DFSAdmin
@@ -800,6 +823,10 @@ public class DFSAdmin extends FsShell {
         exitCode = new SetSpaceQuotaCommand(argv, i, fs).runAll();
       } else if ("-refreshServiceAcl".equals(cmd)) {
         exitCode = refreshServiceAcl();
+      } else if ( "-status".equals(cmd) ) {
+        exitCode = status(argv[1]);
+      } else if ( "-setasmaster".equals(cmd) ) {
+        exitCode = setAsMaster(argv[1]);
       } else if ("-help".equals(cmd)) {
         if (i < argv.length) {
           printHelp(argv[i]);
@@ -835,6 +862,45 @@ public class DFSAdmin extends FsShell {
                          + e.getLocalizedMessage());
     } 
     return exitCode;
+  }
+
+  public int setAsMaster(String masterName) throws IOException {
+	  int exitCode=-1;
+	  
+	  Configuration conf=this.getConf(); 
+	  if(conf==null) 
+		  conf=new Configuration(); 
+	  
+	  DFSClient slaClient = new DFSClient(NNSyncer.AddrFromString(masterName), conf); 
+	  exitCode=slaClient.setAsMaster(masterName);
+	  
+	  return exitCode;
+  }
+  
+  public int status(String masterName) throws IOException {
+	  int extCode=-1;
+	  Configuration conf=this.getConf(); 
+	  if(conf==null) 
+		  conf=new Configuration(); 
+	  
+	  DFSClient slaClient = new DFSClient(NNSyncer.AddrFromString(masterName), conf);
+	  boolean status = slaClient.status(masterName); 
+	  if (status == true){ 
+	      System.out.println("master"); 
+	  } 
+	  else{ 
+	      System.out.println("slave"); 
+	  } 
+	  return 0;
+  }
+  
+  public void removeNode(String deadNode) throws IOException {
+	  Configuration conf=this.getConf(); 
+	  if(conf==null) 
+		  conf=new Configuration(); 
+
+	  NNKeeper nnkeeper=new NNKeeper(conf);
+	  nnkeeper.removeNameNode(deadNode);
   }
 
   /**
