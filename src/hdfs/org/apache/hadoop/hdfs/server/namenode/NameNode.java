@@ -156,11 +156,11 @@ public class NameNode implements ClientProtocol, DatanodeProtocol,
   }
   
   public static InetSocketAddress getAddress(String address) {
-    return NNSyncer.getMasterNameNodeAddress(conf);
+    return NetUtils.createSocketAddr(address, DEFAULT_PORT);
   }
 
   public static InetSocketAddress getAddress(Configuration conf) {
-    return getAddress(FileSystem.getDefaultUri(conf).getAuthority());
+    return NNSyncer.getMasterNameNodeAddress(conf);
   }
 
   public static URI getUri(InetSocketAddress namenode) {
