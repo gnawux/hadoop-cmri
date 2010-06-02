@@ -826,7 +826,7 @@ public class NNSyncSlave extends NNSyncer {
 		world.readFields(in);
 		
 		//save FSImage files
-		namesystem.dir.fsImage.saveFSImage();
+		namesystem.dir.fsImage.saveNamespace(false);
 		
 		LOG.debug("now, turn on the dir (orig: "+namesystem.dir.ready+")");
 		namesystem.dir.ready=true;
