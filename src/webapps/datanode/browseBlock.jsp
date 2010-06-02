@@ -73,7 +73,7 @@
 
     DFSClient dfs = new DFSClient(jspHelper.nameNodeAddr, jspHelper.conf);
     List<LocatedBlock> blocks = 
-      dfs.namenode.getBlockLocations(filename, 0, Long.MAX_VALUE).getLocatedBlocks();
+      dfs.requestronn().getBlockLocations(filename, 0, Long.MAX_VALUE).getLocatedBlocks();
     //Add the various links for looking at the file contents
     //URL for downloading the full file
     String downloadUrl = "http://" + req.getServerName() + ":" +
@@ -252,7 +252,7 @@
     if (startOffset + chunkSizeToView >= blockSize) {
       //we have to go to the next block from this point onwards
       List<LocatedBlock> blocks = 
-        dfs.namenode.getBlockLocations(filename, 0, Long.MAX_VALUE).getLocatedBlocks();
+        dfs.requestronn().getBlockLocations(filename, 0, Long.MAX_VALUE).getLocatedBlocks();
       for (int i = 0; i < blocks.size(); i++) {
         if (blocks.get(i).getBlock().getBlockId() == blockId) {
           if (i != blocks.size() - 1) {
@@ -304,7 +304,7 @@
     int prevDatanodePort = datanodePort;
     if (startOffset == 0) {
       List<LocatedBlock> blocks = 
-        dfs.namenode.getBlockLocations(filename, 0, Long.MAX_VALUE).getLocatedBlocks();
+        dfs.requestronn().getBlockLocations(filename, 0, Long.MAX_VALUE).getLocatedBlocks();
       for (int i = 0; i < blocks.size(); i++) {
         if (blocks.get(i).getBlock().getBlockId() == blockId) {
           if (i != 0) {

@@ -73,7 +73,7 @@
     DFSClient dfs = new DFSClient(jspHelper.nameNodeAddr, 
                                          jspHelper.conf);
     List<LocatedBlock> blocks = 
-      dfs.namenode.getBlockLocations(filename, 0, Long.MAX_VALUE).getLocatedBlocks();
+      dfs.requestronn().getBlockLocations(filename, 0, Long.MAX_VALUE).getLocatedBlocks();
     if (blocks == null || blocks.size() == 0) {
       out.print("No datanodes contain blocks of file "+filename);
       dfs.close();

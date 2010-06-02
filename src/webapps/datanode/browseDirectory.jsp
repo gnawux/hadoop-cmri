@@ -43,7 +43,7 @@
     else {
       if( !dfs.isDirectory(target) ) { // a file
         List<LocatedBlock> blocks = 
-          dfs.namenode.getBlockLocations(dir, 0, 1).getLocatedBlocks();
+          dfs.requestronn().getBlockLocations(dir, 0, 1).getLocatedBlocks();
 	      
         LocatedBlock firstBlock = null;
         DatanodeInfo [] locations = null;
