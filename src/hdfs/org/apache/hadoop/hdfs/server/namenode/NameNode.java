@@ -1020,20 +1020,11 @@ return namenode;
 			}
 		  }
 	  
-	  public int toggleNNC(String cmd) throws IOException{
-		  return namesystem.toggleNNC(cmd);
-	  }
-	  
 	  public String getMasterAddress() throws IOException{
 		  String masterName=this.namesystem.syncAgent.syncMasterAddress.getHostName()+":"+this.serverAddress.getPort();
 		  return masterName;
 	  }
 		
-	@Override
-	public void setSyncer(boolean enable) throws IOException {
-		// TODO Auto-generated method stub
-		
-	}
 
 	public NNSlaveInfo register(NNSlaveInfo slave) throws IOException {
 		  if(this.namesystem.syncAgent instanceof NNSyncMaster){
