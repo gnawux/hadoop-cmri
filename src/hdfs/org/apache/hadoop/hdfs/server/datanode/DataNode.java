@@ -671,6 +671,7 @@ public class DataNode extends Configured
   private void handleDiskError(String errMsgr) {
     LOG.warn("DataNode is shutting down.\n" + errMsgr);
     shouldRun = false;
+	int retryCount=0;
     do{
         try {
             requestnn().errorReport(
