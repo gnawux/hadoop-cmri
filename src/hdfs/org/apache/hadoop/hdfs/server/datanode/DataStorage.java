@@ -27,6 +27,7 @@ import java.nio.channels.FileLock;
 import java.util.Collection;
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedList;
 import java.util.Properties;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -35,12 +36,12 @@ import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.FSConstants;
 import org.apache.hadoop.hdfs.server.common.HdfsConstants.NodeType;
 import org.apache.hadoop.hdfs.server.common.HdfsConstants.StartupOption;
-import org.apache.hadoop.hdfs.server.common.HdfsConstants;
 import org.apache.hadoop.hdfs.server.common.InconsistentFSStateException;
 import org.apache.hadoop.hdfs.server.common.Storage;
 import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.util.Daemon;
+import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.FileUtil.HardLink;
 import org.apache.hadoop.io.IOUtils;
 
@@ -80,6 +81,62 @@ public class DataStorage extends Storage {
     this.storageID = newStorageID;
   }
   
+  synchronized File recoverTransitionReadOne(NamespaceInfo nsInfo,
+			File dataDir, StartupOption startOpt) throws IOException {
+		Collection<File> dataDirs = new LinkedList<File>();
+		dataDirs.add(dataDir);
+		this.recoverTransitionRead(nsInfo, dataDirs, startOpt);
+		// get the current dir
+		Iterator<StorageDirectory> sdIt = this.storageDirs.iterator();
+		StorageDirectory sd = null, tmpSd = null;
+		while (sdIt.hasNext()) {
+			tmpSd = sdIt.next();
+
+			if (tmpSd.getRoot().equals(dataDir)) {
+				sd = tmpSd;
+				break;
+			}
+		}
+		return (sd != null) ? sd.getCurrentDir() : null;
+	}
+
+	/* dataDir indicated it is a root dir */
+	synchronized void delStorageDirectory(File root) {
+		Iterator<StorageDirectory> fileIt = this.storageDirs.iterator();
+		StorageDirectory sd = null;
+		while (fileIt.hasNext()) {
+			sd = fileIt.next();
+
+			if (sd.getRoot().equals(root)) {
+				try {
+					sd.unlock();
+					if (!FileUtil.fullyDelete(sd.getRoot())) {
+						LOG.warn("Clear directory " + sd.getRoot()
+										+ " failed.");
+					} else {
+						LOG.info("Clear directory " + sd.getRoot()
+								+ " successfully.");
+					}
+				} catch (IOException e) {
+				}
+				fileIt.remove();
+				return;
+			}
+		}
+	}
+
+	synchronized String getDataDirs() {
+		Iterator<StorageDirectory> sdIt = this.storageDirs.iterator();
+		String dataDirs = "";
+		while (sdIt.hasNext()) {
+			StorageDirectory sd = sdIt.next();
+			dataDirs += sd.getRoot().getAbsolutePath();
+			if (sdIt.hasNext())
+				dataDirs += ",";
+		}
+		return dataDirs;
+	}
+
   /**
    * Analyze storage directories.
    * Recover from previous transitions if required. 

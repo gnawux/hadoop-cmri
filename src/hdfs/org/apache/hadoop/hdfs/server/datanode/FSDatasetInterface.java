@@ -28,6 +28,8 @@ import java.io.OutputStream;
 
 
 import org.apache.hadoop.hdfs.server.datanode.metrics.FSDatasetMBean;
+import org.apache.hadoop.hdfs.server.datanode.FSDataset.FSVolume;
+import org.apache.hadoop.hdfs.server.protocol.VolumeManagerProtocol.FSVolumeInfo;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.util.DiskChecker.DiskErrorException;
@@ -264,4 +266,18 @@ public interface FSDatasetInterface extends FSDatasetMBean {
    * @throws IOException
    */
   public void validateBlockMetadata(Block b) throws IOException;
+
+  public long addVolume(String root) throws IOException;
+  public FSVolume delVolume(long vid) throws IOException;
+  public FSVolumeInfo[] listVolumes() throws IOException;
+  public FSVolume getDestVolume(FSVolume vol, long blockSize);
+  
+  public DatanodeBlockInfo lockBlock(Block b) ;
+  public boolean unlockBlock(Block b,DatanodeBlockInfo dbi) ;
+  public boolean writeLock(Block b);
+  public boolean writeUnlock(Block b);
+  
+  public void setBlockReadOpTime(Block b, int readTimems, int numBytes);
+  public void setBlockWrittenOpTime(Block b, int writtenTime, int numBytes);
+  public void setBlockFailedOpCount(Block b, int count);
 }

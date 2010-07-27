@@ -19,6 +19,8 @@ package org.apache.hadoop.hdfs.server.datanode;
 
 import java.io.*;
 import java.util.*;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 import javax.management.NotCompliantMBeanException;
 import javax.management.ObjectName;
@@ -33,8 +35,12 @@ import org.apache.hadoop.util.DiskChecker;
 import org.apache.hadoop.util.DiskChecker.DiskErrorException;
 import org.apache.hadoop.util.DiskChecker.DiskOutOfSpaceException;
 import org.apache.hadoop.conf.*;
+import org.apache.hadoop.hdfs.server.common.HdfsConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.datanode.metrics.FSDatasetMBean;
 import org.apache.hadoop.hdfs.server.protocol.InterDatanodeProtocol;
+import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
+import org.apache.hadoop.hdfs.server.protocol.VolumeManagerProtocol.FSVolumeInfo;
+import org.apache.hadoop.hdfs.server.protocol.VolumeManagerProtocol.FSVolumeState;
 
 /**************************************************
  * FSDataset manages a set of data blocks.  Each block
@@ -286,6 +292,96 @@ public class FSDataset implements FSConstants, FSDatasetInterface {
     }
   }
 
+  private static volatile long vidGenerator = 0;
+  static long getNextVolumeId() {
+	  ++vidGenerator;
+	  if (vidGenerator == 0) {
+		  ++vidGenerator;
+	  }
+	  return vidGenerator;
+  }
+  
+  class FSVolumeMetric {
+	  public long numBytesWritten; 
+	  public long numWrittenTimeMs; 
+	  public long numBytesRead;
+	  public long numReadTimeMs;
+	  public long checksumFailedErrorCount; // the error count that checksum failed.
+	  private File  root;
+	  
+	  FSVolumeMetric(File root) throws IOException {
+			this.root = root;
+			File metricsFile = new File(root,"metrics");
+			RandomAccessFile file;
+			try {
+				file = new RandomAccessFile(metricsFile, "rws");
+			} catch (FileNotFoundException e) {
+				setDefault();
+				return;
+			}
+			FileInputStream in = null;
+			try {
+				String str;
+				
+				in = new FileInputStream(file.getFD());
+				file.seek(0);
+				Properties props = new Properties();
+				props.load(in);
+				str = props.getProperty("BytesWritten");
+				this.numBytesWritten = Long.valueOf(str);
+				str = props.getProperty("BytesRead");
+				this.numBytesRead = Long.valueOf(str);
+				str = props.getProperty("BytesWrittenTimeMs");
+				this.numWrittenTimeMs = Long.valueOf(str);
+				str = props.getProperty("BytesReadTimeMs");
+				this.numReadTimeMs = Long.valueOf(str);
+			} catch (IOException e) {
+				setDefault();
+			} catch (NumberFormatException e) {
+				setDefault();
+			} finally {
+				try {
+					if (in != null) {
+						in.close();
+					}
+					file.close();
+				} catch(IOException e) {}
+			}
+		}
+		
+		public void writeBack() throws IOException {
+			File metricsFile = new File(root,"metrics");
+			RandomAccessFile file = new RandomAccessFile(metricsFile, "rws");
+			FileOutputStream out = null;
+			try {
+				out = new FileOutputStream(file.getFD());
+				file.seek(0);
+				Properties props = new Properties();
+				props.setProperty("BytesWritten",String.valueOf(this.numBytesWritten));
+				props.setProperty("BytesRead", String.valueOf(this.numBytesRead));
+				props.setProperty("BytesWrittenTimeMs", String.valueOf(this.numWrittenTimeMs));
+				props.setProperty("BytesReadTimeMs", String.valueOf(this.numReadTimeMs));
+				props.store(out, null);
+				out.getFD().sync();
+				file.setLength(out.getChannel().position());
+				file.getFD().sync();
+			} finally {
+				if (out != null) {
+					out.close();
+				}
+				file.close();
+			}
+		}
+		
+		private void setDefault() throws IOException {
+			this.numBytesRead = 0;
+			this.numBytesWritten = 0;
+			this.numReadTimeMs = 0;
+			this.numWrittenTimeMs = 0;
+			this.writeBack();
+		}
+  }
+
   class FSVolume {
     private FSDir dataDir;
     private File tmpDir;
@@ -293,6 +389,12 @@ public class FSDataset implements FSConstants, FSDatasetInterface {
     private DF usage;
     private DU dfsUsage;
     private long reserved;
+    private final long vid;
+    private File root;
+    private FSVolumeState state = FSVolumeState.VOL_STATE_NORMAL;
+    private FSVolumeMetric metrics;
+    private int progress = 0;
+    private int refCount = 0; // reference count, if have read or write operation.
 
     
     FSVolume(File currentDir, Configuration conf) throws IOException {
@@ -300,6 +402,7 @@ public class FSDataset implements FSConstants, FSDatasetInterface {
       boolean supportAppends = conf.getBoolean("dfs.support.append", false);
       File parent = currentDir.getParentFile();
 
+      this.root = parent;
       this.detachDir = new File(parent, "detach");
       if (detachDir.exists()) {
         recoverDetachedBlocks(currentDir, detachDir);
@@ -332,7 +435,46 @@ public class FSDataset implements FSConstants, FSDatasetInterface {
       this.usage = new DF(parent, conf);
       this.dfsUsage = new DU(parent, conf);
       this.dfsUsage.start();
+      this.vid = getNextVolumeId();
+      this.metrics = new FSVolumeMetric(this.root);
     }
+
+    public void shutdown() {
+    	if (this.dfsUsage != null) {
+        	this.dfsUsage.shutdown();
+    	}
+    	this.usage = null;
+    	this.dfsUsage = null;
+    }
+    
+    /* zdb start */
+    public long getVolumeId() {
+    	return this.vid;
+    }
+    
+    synchronized public void setVolumeState(FSVolumeState state) { 
+    	this.state = state;
+    	if (this.state == FSVolumeState.VOL_STATE_NORMAL) {
+    		this.progress = 0;
+    	}
+    }
+    
+    synchronized public FSVolumeState getVolumeState() {	
+    	return this.state; 
+    }
+    
+    synchronized public void setVolumeProgress(int l) {
+    	this.progress = l;
+    }
+    
+    synchronized public int getVolumeProgress() { return this.progress; }
+
+    public File getRoot() {
+    	return this.root;
+    }
+    synchronized public void incRefCount() { ++this.refCount; }
+    synchronized public void decRefCount() { --this.refCount; }
+    synchronized public int getRefCount() { return this.refCount; }
 
     void decDfsUsed(long value) {
       dfsUsage.decDfsUsed(value);
@@ -479,72 +621,182 @@ public class FSDataset implements FSConstants, FSDatasetInterface {
   }
     
   static class FSVolumeSet {
-    FSVolume[] volumes = null;
+	LinkedList<FSVolume> volumes = null;
     int curVolume = 0;
       
-    FSVolumeSet(FSVolume[] volumes) {
-      this.volumes = volumes;
+    FSVolumeSet(LinkedList<FSVolume> volumes) {
+    	this.volumes = volumes;
     }
+    
+    synchronized long addVolume(FSVolume volume) {
+    	return volumes.add(volume)?volume.getVolumeId():0;
+    }
+    
+    synchronized FSVolume delVolume(long vid) throws IOException {
+    	Iterator<FSVolume> volIt = this.volumes.iterator();
+    	FSVolume vol = null, tmpVol = null;
+    	
+    	if (this.volumes.size() > 1) {
+    		while(volIt.hasNext()) {
+    			tmpVol = volIt.next();
+        		if (tmpVol.getVolumeId() == vid) {
+        			if (tmpVol.getVolumeState() == FSVolumeState.VOL_STATE_NORMAL) {
+        				tmpVol.setVolumeState(FSVolumeState.VOL_STATE_LOCKED);
+        				vol = tmpVol;
+        				break;
+        			}
+        			else {
+        				throw new IOException("You can\'t delete the volume that is in process.");
+        			}
+        		}
+//        		if (tmpVol.getVolumeState() == FSVolumeState.VOL_STATE_LOCKED) {
+//    				throw new IOException("You can\'t delete the volume while the other is in process.");
+//    			}
+        	}
+    		if (vol != null) {
+        		return vol;
+        	}
+    		throw new IOException("the volume id " + vid + " isn\t exist.");
+    	}
+    	else {
+    		throw new IOException("the volume of current datanode is only one, you can't delete it.");
+    	}
+    }
+    
+    synchronized boolean realDelVolume(long vid) {
+    	Iterator<FSVolume> volIt = this.volumes.iterator();
+    	while (volIt.hasNext()) {
+    		FSVolume vol = volIt.next();
+    		if (vol.getVolumeId() == vid) {
+    			vol.shutdown();
+    			volIt.remove();
+    			return true;
+    		}
+    	}
+    	return false;
+    }
+    
+    synchronized public boolean setVolumeProgress(long vid, int progress) {
+    	Iterator<FSVolume> volIt = this.volumes.iterator();
+    	while (volIt.hasNext()) {
+    		FSVolume vol = volIt.next();
+    		if (vol.getVolumeId() == vid) {
+    			vol.setVolumeProgress(progress);
+    			return true;
+    		}
+    	}
+    	return false;
+    }
+    
+    synchronized FSVolume getDestVolume(FSVolume srcVol, long blockSize) {
+    	try {
+			return this.getNextVolume(blockSize);
+		} catch (IOException e) {}
+		return null;
+    }
+    
+    synchronized FSVolumeInfo[] listVolumes() throws IOException {
+    	FSVolumeInfo[] fsVolInfoArray = new FSVolumeInfo[volumes.size()];
+    	Iterator<FSVolume> volIt = this.volumes.iterator();
+    	FSVolume vol = null;
+    	FSVolumeInfo fsvolInfo = null;
+    	int idx = 0;
+    	while(volIt.hasNext()) {
+    		vol = volIt.next();
+    		fsvolInfo = new FSVolumeInfo(vol.getRoot(), vol.getVolumeId());
+    		fsvolInfo.setVolumeState(vol.getVolumeState());
+    		fsvolInfo.setVolumeProgress(vol.getVolumeProgress());
+    		fsvolInfo.setRefCount(vol.getRefCount());
+    		if (vol.metrics != null) {
+    			fsvolInfo.setWrittenBytes(vol.metrics.numBytesWritten);
+    			fsvolInfo.setReadBytes(vol.metrics.numBytesRead);
+    			fsvolInfo.setWrittenTime(vol.metrics.numWrittenTimeMs);
+    			fsvolInfo.setReadTime(vol.metrics.numBytesRead);
+    			fsvolInfo.setChecksumFailedCount(vol.metrics.checksumFailedErrorCount);
+    		}
+    		fsVolInfoArray[idx++] = fsvolInfo;
+    	}
+    	return fsVolInfoArray;
+    }      
       
     synchronized FSVolume getNextVolume(long blockSize) throws IOException {
-      int startVolume = curVolume;
-      while (true) {
-        FSVolume volume = volumes[curVolume];
-        curVolume = (curVolume + 1) % volumes.length;
-        if (volume.getAvailable() > blockSize) { return volume; }
-        if (curVolume == startVolume) {
-          throw new DiskOutOfSpaceException("Insufficient space for an additional block");
+    	int startVolume = curVolume;
+        while (true) {
+      	  FSVolume volume = null;
+      	  try {
+      		  volume = volumes.get(curVolume);
+      		  curVolume = (curVolume + 1) % volumes.size();
+      	  } catch(IndexOutOfBoundsException e) {
+      		  curVolume = 0;
+      		  startVolume = 0;
+      		  continue;
+      	  }
+      	  if (volume.getVolumeState() != FSVolumeState.VOL_STATE_NORMAL) {
+      		  continue;
+      	  }
+          if (volume.getAvailable() > blockSize) { return volume; }
+          if (curVolume == startVolume) {
+              throw new DiskOutOfSpaceException("Insufficient space for an additional block");
+          }
         }
-      }
     }
       
     long getDfsUsed() throws IOException {
-      long dfsUsed = 0L;
-      for (int idx = 0; idx < volumes.length; idx++) {
-        dfsUsed += volumes[idx].getDfsUsed();
-      }
-      return dfsUsed;
+    	long dfsUsed = 0L;
+    	Iterator<FSVolume> volIt = volumes.iterator();
+        while (volIt.hasNext()) {
+      	  dfsUsed += volIt.next().getDfsUsed();
+        }
+        return dfsUsed;
     }
 
     synchronized long getCapacity() throws IOException {
-      long capacity = 0L;
-      for (int idx = 0; idx < volumes.length; idx++) {
-        capacity += volumes[idx].getCapacity();
-      }
-      return capacity;
+    	long capacity = 0L;
+        Iterator<FSVolume> volIt = volumes.iterator();
+        while (volIt.hasNext()) {
+    	    capacity += volIt.next().getCapacity();
+        }
+        return capacity;
     }
       
     synchronized long getRemaining() throws IOException {
       long remaining = 0L;
-      for (int idx = 0; idx < volumes.length; idx++) {
-        remaining += volumes[idx].getAvailable();
+      Iterator<FSVolume> volIt = volumes.iterator();
+      while (volIt.hasNext()) {
+  	    remaining += volIt.next().getAvailable();
       }
       return remaining;
     }
       
     synchronized void getBlockInfo(TreeSet<Block> blockSet) {
-      for (int idx = 0; idx < volumes.length; idx++) {
-        volumes[idx].getBlockInfo(blockSet);
-      }
+    	Iterator<FSVolume> volIt = volumes.iterator();
+        while (volIt.hasNext()) {
+      	  volIt.next().getBlockInfo(blockSet);
+        }
     }
       
     synchronized void getVolumeMap(HashMap<Block, DatanodeBlockInfo> volumeMap) {
-      for (int idx = 0; idx < volumes.length; idx++) {
-        volumes[idx].getVolumeMap(volumeMap);
-      }
+    	Iterator<FSVolume> volIt = volumes.iterator();
+        while (volIt.hasNext()) {
+      	  volIt.next().getVolumeMap(volumeMap);
+        }
     }
       
     synchronized void checkDirs() throws DiskErrorException {
-      for (int idx = 0; idx < volumes.length; idx++) {
-        volumes[idx].checkDirs();
-      }
+    	Iterator<FSVolume> volIt = volumes.iterator();
+        while (volIt.hasNext()) {
+      	  volIt.next().checkDirs();
+        }
     }
       
     public String toString() {
       StringBuffer sb = new StringBuffer();
-      for (int idx = 0; idx < volumes.length; idx++) {
-        sb.append(volumes[idx].toString());
-        if (idx != volumes.length - 1) { sb.append(","); }
+      Iterator<FSVolume> volIt = volumes.iterator();
+      while (volIt.hasNext()) {
+    	  sb.append(volIt.next().toString());
+    	  if (volIt.hasNext()) {
+    		  sb.append(",");
+    	  }
       }
       return sb.toString();
     }
@@ -674,24 +926,33 @@ public class FSDataset implements FSConstants, FSDatasetInterface {
   }
 
   FSVolumeSet volumes;
+  NamespaceInfo nsInfo;
+  DataStorage storage;
+  Configuration conf;
+  DataNode datanode;
   private HashMap<Block,ActiveFile> ongoingCreates = new HashMap<Block,ActiveFile>();
   private int maxBlocksPerDir = 0;
   private HashMap<Block,DatanodeBlockInfo> volumeMap = null;
+  private HashMap<Block,Lock> writeLocksMap = null;
   static  Random random = new Random();
   
   /**
    * An FSDataset has a directory where it loads its data files.
    */
-  public FSDataset(DataStorage storage, Configuration conf) throws IOException {
-    this.maxBlocksPerDir = conf.getInt("dfs.datanode.numblocks", 64);
-    FSVolume[] volArray = new FSVolume[storage.getNumStorageDirs()];
-    for (int idx = 0; idx < storage.getNumStorageDirs(); idx++) {
-      volArray[idx] = new FSVolume(storage.getStorageDir(idx).getCurrentDir(), conf);
-    }
-    volumes = new FSVolumeSet(volArray);
-    volumeMap = new HashMap<Block, DatanodeBlockInfo>();
-    volumes.getVolumeMap(volumeMap);
-    registerMBean(storage.getStorageID());
+  public FSDataset(NamespaceInfo nsInfo, DataStorage storage, Configuration conf) throws IOException {
+	    this.maxBlocksPerDir = conf.getInt("dfs.datanode.numblocks", 64);
+	    LinkedList<FSVolume> volList = new LinkedList<FSVolume>();
+	    for (int idx = 0; idx < storage.getNumStorageDirs(); idx++) {
+	        volList.add(new FSVolume(storage.getStorageDir(idx).getCurrentDir(), conf));
+	    }
+	    volumes = new FSVolumeSet(volList);
+	    volumeMap = new HashMap<Block, DatanodeBlockInfo>();
+	    writeLocksMap = new HashMap<Block,Lock>();
+	    volumes.getVolumeMap(volumeMap);
+	    registerMBean(storage.getStorageID());
+	    this.nsInfo = nsInfo;
+	    this.storage = storage;
+	    this.conf = conf;
   }
 
   /**
@@ -967,6 +1228,22 @@ public class FSDataset implements FSConstants, FSDatasetInterface {
     }
   }
 
+  synchronized public File moveBlockToVolume(Block b, FSVolume vol) 
+  throws IOException {
+	  if (isValidBlock(b)) {
+		  if (volumeMap.get(b).getVolume().getVolumeId() != 
+			  vol.getVolumeId()) {
+			  return vol.getTmpFile(b);
+		  }
+		  else {
+			  throw new IOException("Can\'t move it to the same volume.");
+		  }
+	  }
+	  else {
+		  throw new IOException("Invalid block.");
+	  }
+  }
+
   /**
    * Start writing to a block file
    * If isRecovery is true and the block pre-exists, then we kill all
@@ -1165,6 +1442,13 @@ public class FSDataset implements FSConstants, FSDatasetInterface {
     ongoingCreates.remove(b);
   }
 
+  public synchronized void finalizeBlockMove(FSVolume volume, Block b, File blockFile)
+  throws IOException {
+	  File dest = null;
+	  dest = volume.addBlock(b, blockFile);
+	  volumeMap.put(b, new DatanodeBlockInfo(volume, dest));
+  }
+  
   /**
    * Remove the temporary block file (if any)
    */
@@ -1373,6 +1657,14 @@ public class FSDataset implements FSConstants, FSDatasetInterface {
     return null;
   }
 
+  public synchronized FSVolume getVolume(Block b) {
+	  DatanodeBlockInfo info = volumeMap.get(b);
+	  if (info != null) {
+	    return info.getVolume();
+	  }
+	  return null;
+  }
+
   /**
    * check if a data directory is healthy
    * @throws DiskErrorException
@@ -1429,5 +1721,148 @@ public class FSDataset implements FSConstants, FSDatasetInterface {
 
   public String getStorageInfo() {
     return toString();
+  }
+  
+  public void setDatanode(DataNode datanode) { this.datanode = datanode; }
+  
+  synchronized public long addVolume(String dir) throws IOException {
+	  	File root = new File(dir);
+	  	File curDir = null;
+	  	if (root.exists()) {
+	  		curDir = storage.recoverTransitionReadOne(nsInfo, root, StartupOption.FORMAT);
+			FSVolume volume = new FSVolume(curDir,conf);
+			volume.getVolumeMap(this.volumeMap);
+			return this.volumes.addVolume(volume);
+	  	}
+	  	else {
+	  		throw new IOException("The directory " + dir + " isn\'t exist.");
+	  	}
+  }
+
+  synchronized public FSVolume delVolume(long vid) throws IOException{
+	  return this.volumes.delVolume(vid);
+  }
+
+  synchronized public boolean realDelVolume(long vid) {
+ 	  return this.volumes.realDelVolume(vid);
+  }
+
+  synchronized public FSVolumeInfo[] listVolumes() throws IOException {
+	  return this.volumes.listVolumes();
+  }
+
+  public FSVolume getDestVolume(FSVolume vol, long blockSize) {
+	  return this.volumes.getDestVolume(vol, blockSize);
+  }
+ 
+  synchronized public boolean setVolumeProgress(long vid, int progress) {
+	  return this.volumes.setVolumeProgress(vid, progress);
+  }
+  
+  synchronized public DatanodeBlockInfo lockBlock(Block b)  {
+	  DatanodeBlockInfo dbi = this.volumeMap.get(b);
+	  if (dbi != null) {
+		  FSVolume volume = dbi.getVolume();
+		  if (volume != null) {
+			  volume.incRefCount();
+			  return dbi;
+		  }
+	  }
+	  return null;
+  }
+
+  synchronized public boolean unlockBlock(Block b, DatanodeBlockInfo dbi) {
+	  if (dbi != null) {
+			FSVolume volume = dbi.getVolume();
+			if (volume != null) {
+				volume.decRefCount();
+				if (volume.getRefCount() == 0
+						&& volume.getVolumeState() == FSVolumeState.VOL_STATE_PENDINGRM) {
+					this.datanode.realDelVolume(volume);
+					return true;
+				}
+			}
+		}
+	  return false;
+  }
+
+  public boolean writeLock(Block b) {
+		Lock writeLock = null;
+
+		synchronized (this.writeLocksMap) {
+			writeLock = this.writeLocksMap.get(b);
+			if (writeLock == null) {
+				writeLock = new ReentrantLock();
+				this.writeLocksMap.put(b, writeLock);
+			}
+		}
+		writeLock.lock();
+		return true;
+  }
+
+  public boolean writeUnlock(Block b) {
+		Lock writeLock = null;
+
+		synchronized (this.writeLocksMap) {
+			writeLock = this.writeLocksMap.get(b);
+			if (writeLock == null) {
+				return false;
+			}
+		}
+		writeLock.unlock();
+		synchronized (this.writeLocksMap) {
+			if (!writeLock.tryLock()) {
+				this.writeLocksMap.remove(b);
+			}
+		}
+		return true;
+  }
+  
+  public synchronized void setBlockReadOpTime(Block b, int readTimems, int numBytes) {
+	  DatanodeBlockInfo info = volumeMap.get(b);
+	  FSVolume volume = null;
+	  
+	  if (info != null) {
+		  volume = info.getVolume();  
+		  if (volume != null) {
+			  volume.metrics.numReadTimeMs += readTimems;
+			  volume.metrics.numBytesRead += numBytes;
+			  try {
+					volume.metrics.writeBack();
+			  } catch (IOException e) { }
+		  }
+	  }
+  }
+  
+  public synchronized void setBlockWrittenOpTime(Block b, int writtenTime, int numBytes) {
+	  DatanodeBlockInfo info = volumeMap.get(b);
+	  FSVolume volume = null;
+	  
+	  if (info != null) {
+		  volume = info.getVolume();  
+		  if (volume != null) {
+			  volume.metrics.numWrittenTimeMs += writtenTime;
+			  volume.metrics.numBytesWritten += numBytes;
+			  try {
+				volume.metrics.writeBack();
+			  } catch (IOException e) { }
+		  }
+	  }
+  }
+
+  @Override
+  public synchronized void setBlockFailedOpCount(Block b, int count) {
+	  DatanodeBlockInfo info = volumeMap.get(b);
+	  FSVolume volume = null;
+	  
+	  if (info != null) {
+		  volume = info.getVolume();  
+		  if (volume != null) {
+			  volume.metrics.checksumFailedErrorCount += count;
+			  try {
+				volume.metrics.writeBack();
+			  } catch (IOException e) { }
+		  }
+	  }
   }
 }

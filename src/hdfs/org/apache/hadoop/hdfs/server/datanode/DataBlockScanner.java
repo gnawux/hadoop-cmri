@@ -34,6 +34,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedList;
 import java.util.Random;
 import java.util.TreeSet;
 import java.util.regex.Matcher;
@@ -49,6 +50,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+import org.apache.hadoop.hdfs.server.datanode.FSDataset.FSVolume;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.util.StringUtils;
 
@@ -65,6 +67,7 @@ class DataBlockScanner implements Runnable {
   private static final int MIN_SCAN_RATE = 1 * 1024 * 1024; // 1MB per sec
   
   static final long DEFAULT_SCAN_PERIOD_HOURS = 21*24L; // three weeks
+  static final long DEFAULT_SCAN_PERIOD_MINUTES = 3*60;   // three hours
   private static final long ONE_DAY = 24*3600*1000L;
   
   static final DateFormat dateFormat = 
@@ -72,6 +75,7 @@ class DataBlockScanner implements Runnable {
   
   static final String verificationLogFile = "dncp_block_verification.log";
   static final int verficationLogLimit = 5; // * numBlocks.
+  static int verificationLogMaxLine = 1000; // line number
 
   private long scanPeriod = DEFAULT_SCAN_PERIOD_HOURS * 3600 * 1000;
   DataNode datanode;
@@ -90,8 +94,6 @@ class DataBlockScanner implements Runnable {
   long bytesLeft = 0; // Bytes to scan in this period
   long totalBytesToScan = 0;
   
-  private LogFileHandler verificationLog;
-  
   Random random = new Random();
   
   BlockTransferThrottler throttler = null;
@@ -101,6 +103,33 @@ class DataBlockScanner implements Runnable {
     VERIFICATION_SCAN,     // scanned as part of periodic verfication
     NONE,
   }
+  
+  private class LogFile {
+	  FSVolume volume;
+	  LogFileHandler verificationLog;
+	  
+	  LogFile(FSVolume volume) throws IOException {
+		  this.volume = volume;
+		  try {
+		      // max lines will be updated later during initialization.
+		      verificationLog = new LogFileHandler(this.volume.getDir(), 
+		    		  verificationLogFile, DataBlockScanner.verificationLogMaxLine);
+		  } catch (IOException e) {
+		      LOG.warn("Could not open verfication log. " +
+		               "Verification times are not stored.");
+		      throw e;
+		  }
+	  }
+	  
+	  void shutdown() {
+		  if (verificationLog != null) {
+			  verificationLog.close();
+			  verificationLog = null;
+		  }
+	  }
+  }
+
+  HashMap<Long, LogFile> logFileList = new HashMap<Long, LogFile>();
   
   static class BlockScanInfo implements Comparable<BlockScanInfo> {
     Block block;
@@ -134,14 +163,22 @@ class DataBlockScanner implements Runnable {
     }
   }
   
-  DataBlockScanner(DataNode datanode, FSDataset dataset, Configuration conf) {
+  DataBlockScanner(DataNode datanode, FSDataset dataset, Configuration conf) throws IOException {
     this.datanode = datanode;
     this.dataset = dataset;
-    scanPeriod = conf.getInt("dfs.datanode.scan.period.hours", 0);
+    // scan peroid
+    scanPeriod = conf.getInt("dfs.datanode.scan.period.hours", 0) * 60;
+    scanPeriod += conf.getInt("dfs.datanode.scan.period.minutes", 0);
     if ( scanPeriod <= 0 ) {
-      scanPeriod = DEFAULT_SCAN_PERIOD_HOURS;
+      scanPeriod = DEFAULT_SCAN_PERIOD_MINUTES;
     }
-    scanPeriod *= 3600 * 1000;
+    scanPeriod *= 60 * 1000;
+    // verification log max line
+    verificationLogMaxLine = conf.getInt("dfs.datanode.scan.log.maxline", -1);
+    if (verificationLogMaxLine < 0) {
+    	verificationLogMaxLine = 1000;
+    }
+    initLogFileHandler();
     // initialized when the scanner thread is started.
   }
   
@@ -163,11 +200,9 @@ class DataBlockScanner implements Runnable {
     boolean added = blockInfoSet.add(info);
     blockMap.put(info.block, info);
     
+    info.lastLogTime = System.currentTimeMillis();
     if ( added ) {
-      LogFileHandler log = verificationLog;
-      if (log != null) {
-        log.setMaxNumLines(blockMap.size() * verficationLogLimit);
-      }
+      LogFileHandler log = getLogFileHandler(info.block);
       updateBytesToScan(info.block.getNumBytes(), info.lastScanTime);
     }
   }
@@ -176,10 +211,7 @@ class DataBlockScanner implements Runnable {
     boolean exists = blockInfoSet.remove(info);
     blockMap.remove(info.block);
     if ( exists ) {
-      LogFileHandler log = verificationLog;
-      if (log != null) {
-        log.setMaxNumLines(blockMap.size() * verficationLogLimit);
-      }
+        LogFileHandler log = getLogFileHandler(info.block);
       updateBytesToScan(-info.block.getNumBytes(), info.lastScanTime);
     }
   }
@@ -197,7 +229,7 @@ class DataBlockScanner implements Runnable {
     }
   }
 
-  private void init() {
+  private void init(){
     
     // get the list of blocks and arrange them in random order
     Block arr[] = dataset.getBlockReport();
@@ -214,34 +246,37 @@ class DataBlockScanner implements Runnable {
       addBlockInfo(info);
     }
 
-    /* Pick the first directory that has any existing scanner log.
-     * otherwise, pick the first directory.
-     */
-    File dir = null;
-    FSDataset.FSVolume[] volumes = dataset.volumes.volumes;
-    for(FSDataset.FSVolume vol : volumes) {
-      if (LogFileHandler.isFilePresent(vol.getDir(), verificationLogFile)) {
-        dir = vol.getDir();
-        break;
-      }
-    }
-    if (dir == null) {
-      dir = volumes[0].getDir();
-    }
-    
-    try {
-      // max lines will be updated later during initialization.
-      verificationLog = new LogFileHandler(dir, verificationLogFile, 100);
-    } catch (IOException e) {
-      LOG.warn("Could not open verfication log. " +
-               "Verification times are not stored.");
-    }
-    
     synchronized (this) {
       throttler = new BlockTransferThrottler(200, MAX_SCAN_RATE);
     }
   }
 
+  private void initLogFileHandler() throws IOException {
+	  LinkedList<FSDataset.FSVolume> volumes = dataset.volumes.volumes;
+	  if (volumes.isEmpty()) {
+		  throw new IOException("There is no available volume."); //*CR* It's better Log it out here
+	  }
+	  for (FSDataset.FSVolume vol : volumes) {
+		  if (LogFileHandler.isFilePresent(vol.getDir(), verificationLogFile)) {
+			  
+		  }
+		  LogFile logFile = new LogFile(vol);
+		  
+		  this.logFileList.put(Long.valueOf(vol.getVolumeId()), 
+		  		logFile);
+	  }
+	}
+
+  private LogFileHandler getLogFileHandler(Block b) {
+	  FSVolume volume = this.dataset.getVolume(b);
+      LogFile lf = null;
+      if (volume == null) {
+    	  return null;
+      }
+      lf = this.logFileList.get(Long.valueOf(volume.getVolumeId()));
+      return (lf != null)?lf.verificationLog : null;
+  }
+  
   private synchronized long getNewBlockScanTime() {
     /* If there are a lot of blocks, this returns a random time with in 
      * the scan period. Otherwise something sooner.
@@ -308,6 +343,13 @@ class DataBlockScanner implements Runnable {
     BlockScanInfo info = blockMap.get(block);
     
     if ( info != null ) {
+        if (scanOk) {
+      	  LogFileHandler log = getLogFileHandler(block);
+      	  if (log != null) {
+      	      log.appendLine(LogEntry.newEnry(block, info.lastLogTime,
+      	    		  System.currentTimeMillis()));
+      	  }
+        }
       delBlockInfo(info);
     } else {
       // It might already be removed. Thats ok, it will be caught next time.
@@ -333,10 +375,6 @@ class DataBlockScanner implements Runnable {
     }
     
     info.lastLogTime = now;
-    LogFileHandler log = verificationLog;
-    if (log != null) {
-      log.appendLine(LogEntry.newEnry(block, now));
-    }
   }
   
   private void handleScanFailure(Block block) {
@@ -372,11 +410,12 @@ class DataBlockScanner implements Runnable {
     private static Pattern entryPattern = 
       Pattern.compile("\\G\\s*([^=\\p{Space}]+)=\"(.*?)\"\\s*");
     
-    static String newEnry(Block block, long time) {
-      return "date=\"" + dateFormat.format(new Date(time)) + "\"\t " +
-             "time=\"" + time + "\"\t " +
-             "genstamp=\"" + block.getGenerationStamp() + "\"\t " +
-             "id=\"" + block.getBlockId() +"\"";
+    static String newEnry(Block block, long time, long now) {
+        long inteval = now - time;
+        return "date=\"" + dateFormat.format(new Date(now)) + "\"\t " +
+               "time=\"" + inteval + "\"\t " +
+               "genstamp=\"" + block.getGenerationStamp() + "\"\t " +
+               "id=\"" + block.getBlockId() +"\"";
     }
     
     static LogEntry parseEntry(String line) {
@@ -413,6 +452,7 @@ class DataBlockScanner implements Runnable {
   
   private void verifyBlock(Block block) {
     
+	long start = System.currentTimeMillis();
     BlockSender blockSender = null;
 
     /* In case of failure, attempt to read second time to reduce
@@ -434,7 +474,8 @@ class DataBlockScanner implements Runnable {
         blockSender.sendBlock(out, null, throttler);
 
         LOG.info((second ? "Second " : "") +
-                 "Verification succeeded for " + block);
+                "Verification succeeded for " + block +
+                "(" + (System.currentTimeMillis() - start) + " ms)");
         
         if ( second ) {
           totalTransientErrors++;
@@ -461,6 +502,7 @@ class DataBlockScanner implements Runnable {
                  StringUtils.stringifyException(e));
         
         if (second) {
+          this.dataset.setBlockFailedOpCount(block, 1);
           datanode.getMetrics().blockVerificationFailures.inc(); 
           handleScanFailure(block);
           return;
@@ -505,33 +547,40 @@ class DataBlockScanner implements Runnable {
     }
     
     //First udpates the last verification times from the log file.
-    LogFileHandler.Reader logReader = null;
-    try {
-      if (verificationLog != null) {
-        logReader = verificationLog.new Reader(false);
-      }
-    } catch (IOException e) {
-      LOG.warn("Could not read previous verification times : " +
-               StringUtils.stringifyException(e));
-    }
-    
-    if (verificationLog != null) {
-      verificationLog.updateCurNumLines();
-    }
-    
-    try {
-    // update verification times from the verificationLog.
-    while (logReader != null && logReader.hasNext()) {
-      if (!datanode.shouldRun || Thread.interrupted()) {
-        return false;
-      }
-      LogEntry entry = LogEntry.parseEntry(logReader.next());
-      if (entry != null) {
-        updateBlockInfo(entry);
-      }
-    }
-    } finally {
-      IOUtils.closeStream(logReader);
+    Iterator<LogFile> lfIt = logFileList.values().iterator();
+    while (lfIt.hasNext()) {
+    	LogFile lf =  lfIt.next();
+    	
+    	LogFileHandler.Reader logReader = null;
+    	if (lf != null) {
+    		LogFileHandler verificationLog = lf.verificationLog;
+            try {
+              if (verificationLog != null) {
+                logReader = verificationLog.new Reader(false);
+              }
+            } catch (IOException e) {
+              LOG.warn("Could not read previous verification times : " +
+                       StringUtils.stringifyException(e));
+            }
+            
+            if (verificationLog != null) {
+              verificationLog.updateCurNumLines();
+            }	
+            try {
+                // update verification times from the verificationLog.
+                while (logReader != null && logReader.hasNext()) {
+                  if (!datanode.shouldRun || Thread.interrupted()) {
+                    return false;
+                  }
+                  LogEntry entry = LogEntry.parseEntry(logReader.next());
+                  if (entry != null) {
+                    updateBlockInfo(entry);
+                  }
+                }
+            } finally {
+                  IOUtils.closeStream(logReader);
+            }
+    	}
     }
     
     /* Initially spread the block reads over half of 
@@ -607,11 +656,14 @@ class DataBlockScanner implements Runnable {
   }
   
   synchronized void shutdown() {
-    LogFileHandler log = verificationLog;
-    verificationLog = null;
-    if (log != null) {
-      log.close();
-    }
+		Iterator<LogFile> lfIt = logFileList.values().iterator();
+		while (lfIt.hasNext()) {
+			LogFile lf = lfIt.next();
+			if (lf != null) {
+				lf.shutdown();
+			}
+		}
+	    this.logFileList.clear();
   }
   
   synchronized void printBlockReport(StringBuilder buffer, 
@@ -965,5 +1017,40 @@ class DataBlockScanner implements Runnable {
       }
       response.getWriter().write(buffer.toString()); // extra copy!
     }
+  }
+
+  synchronized boolean addVolume(long vid) {
+	  LinkedList<FSDataset.FSVolume> volumes = dataset.volumes.volumes;
+	  
+	  for ( FSDataset.FSVolume vol : volumes) {
+		  if (vol.getVolumeId() == vid ) {
+			if (LogFileHandler.isFilePresent(vol.getDir(), verificationLogFile)) { //*CR* Empty condition clause, What's the matter?
+			}
+			LogFile logFile,lastLogFile = null;
+			try {
+				logFile = new LogFile(vol);
+			} catch (IOException e) {
+				return false;
+			}
+			logFile.verificationLog.setMaxNumLines(verificationLogMaxLine);
+			  
+			lastLogFile = this.logFileList.put(Long.valueOf(vol.getVolumeId()), 
+			  		logFile);
+			if (lastLogFile != null) {
+				lastLogFile.shutdown();
+				lastLogFile = null;
+			}
+			return true;
+		  }
+	  }
+	  return false;
+  }
+  
+  synchronized void delVolume(long vid) {
+	  LogFile lf = this.logFileList.remove(Long.valueOf(vid));
+	  
+	  if (lf != null) {
+		  lf.shutdown();
+	  }
   }
 }

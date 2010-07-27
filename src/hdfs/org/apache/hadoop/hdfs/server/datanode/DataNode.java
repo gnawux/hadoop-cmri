@@ -20,6 +20,8 @@ package org.apache.hadoop.hdfs.server.datanode;
 import java.io.BufferedOutputStream;
 import java.io.DataOutputStream;
 import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
@@ -58,12 +60,13 @@ import org.apache.hadoop.hdfs.protocol.UnregisteredDatanodeException;
 import org.apache.hadoop.hdfs.server.common.HdfsConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.common.HdfsConstants;
 import org.apache.hadoop.hdfs.server.common.GenerationStamp;
+
 import org.apache.hadoop.hdfs.server.common.IncorrectVersionException;
 import org.apache.hadoop.hdfs.server.common.Storage;
+import org.apache.hadoop.hdfs.server.datanode.FSDataset.FSVolume;
 import org.apache.hadoop.hdfs.server.datanode.metrics.DataNodeMetrics;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.FileChecksumServlets;
-import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.StreamFile;
 import org.apache.hadoop.hdfs.server.protocol.BlockCommand;
 import org.apache.hadoop.hdfs.server.protocol.BlockMetaDataInfo;
@@ -74,6 +77,7 @@ import org.apache.hadoop.hdfs.server.protocol.DisallowedDatanodeException;
 import org.apache.hadoop.hdfs.server.protocol.InterDatanodeProtocol;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.UpgradeCommand;
+import org.apache.hadoop.hdfs.server.protocol.VolumeManagerProtocol;
 import org.apache.hadoop.http.HttpServer;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.Text;
@@ -127,7 +131,7 @@ import org.apache.hadoop.hdfs.zookeeper.ZkNameNode;
  *
  **********************************************************/
 public class DataNode extends Configured 
-    implements InterDatanodeProtocol, ClientDatanodeProtocol, FSConstants, Runnable {
+    implements InterDatanodeProtocol, ClientDatanodeProtocol, VolumeManagerProtocol, FSConstants, Runnable {
   public static final Log LOG = LogFactory.getLog(DataNode.class);
   
   static{
@@ -190,11 +194,15 @@ public class DataNode extends Configured
   
   public DataBlockScanner blockScanner = null;
   public Daemon blockScannerThread = null;
+  public DataBlockMover blockMover = null;
   
   private static final Random R = new Random();
   
   // For InterDataNodeProtocol
   public Server ipcServer;
+  
+  private Server volumeManagerServer;
+  private Configuration conf = null;
 
   /**
    * Current system time.
@@ -235,6 +243,8 @@ public class DataNode extends Configured
   void startDataNode(Configuration conf, 
                      AbstractList<File> dataDirs
                      ) throws IOException {
+	FSDataset dataset = null;  
+	  
     // use configured nameserver & interface to get local hostname
     if (conf.get("slave.host.name") != null) {
       machineName = conf.get("slave.host.name");   
@@ -297,7 +307,9 @@ public class DataNode extends Configured
       // adjust
       this.dnRegistration.setStorageInfo(storage);
       // initialize data node internal structure
-      this.data = new FSDataset(storage, conf);
+      dataset = new FSDataset(nsInfo, storage, conf);
+      dataset.setDatanode(this);
+      this.data = dataset;
     }
 
       
@@ -341,6 +353,19 @@ public class DataNode extends Configured
     } else {
       LOG.info("Periodic Block Verification is disabled because " +
                reason + ".");
+    }
+    
+    //  initialize block mover
+    String blockMoveReason = null;
+    if (conf.getBoolean("dfs.datanode.blockmover", false)) {
+    	blockMoveReason = "block mover is turned off by configuration";
+    } else if ( !(data instanceof FSDataset) ) {
+    	blockMoveReason = "Block Mover is supported only with FSDataset";
+    } 
+    if (blockMoveReason == null) {
+    	blockMover = new DataBlockMover(this,this.storage, this.data, conf);
+    } else {
+    	LOG.info("Block Mover is disabled, because " + blockMoveReason + ".");
     }
 
     //create a servlet to serve full-file content
@@ -394,6 +419,10 @@ public class DataNode extends Configured
     dnRegistration.setIpcPort(ipcServer.getListenerAddress().getPort());
 
     LOG.info("dnRegistration = " + dnRegistration);
+    
+    //  init volume manager server
+    createVolumeManagerServer(dataset,conf);
+    this.conf = conf;
   }
 
   /**
@@ -842,6 +871,8 @@ public class DataNode extends Configured
             upgradeManager.isUpgradeCompleted()) {
           LOG.info("Starting Periodic block scanner.");
           blockScannerThread = new Daemon(blockScanner);
+          blockScannerThread.checkAccess();
+          blockScannerThread.setPriority(blockScannerThread.getPriority() - 1);
           blockScannerThread.start();
         }
             
@@ -1524,6 +1555,8 @@ public class DataNode extends Configured
       return InterDatanodeProtocol.versionID; 
     } else if (protocol.equals(ClientDatanodeProtocol.class.getName())) {
       return ClientDatanodeProtocol.versionID; 
+    } else if (protocol.equals(VolumeManagerProtocol.class.getName())) {
+	      return VolumeManagerProtocol.versionID; 
     }
     throw new IOException("Unknown protocol to " + getClass().getSimpleName()
         + ": " + protocol);
@@ -1718,5 +1751,82 @@ public class DataNode extends Configured
     }
     LOG.info(who + " calls recoverBlock(block=" + block
         + ", targets=[" + msg + "])");
+  }
+
+  private void createVolumeManagerServer(FSDataset dataset, Configuration conf) throws IOException {
+	  InetSocketAddress ipcAddr = NetUtils.createSocketAddr(
+		        conf.get("dfs.datanode.ipc.volumemanager.address", "0.0.0.0:50082"));
+	  
+	  this.volumeManagerServer = RPC.getServer(this, ipcAddr.getHostName(), ipcAddr.getPort(), 
+	        conf.getInt("dfs.datanode.handler.count", 3), false, conf);
+	  this.volumeManagerServer.start();
+  }
+  
+  public long addVolume(String root) throws IOException {
+	  long vid = this.data.addVolume(root);
+	  if (vid > 0) {
+		  this.blockScanner.addVolume(vid);
+	  }
+	  return vid;
+  }
+
+  public void delVolume(long vid) throws IOException {
+	  FSVolume vol = this.data.delVolume(vid);
+	  if (vol != null) {
+		  if (this.blockMover != null) {
+			  this.blockMover.startMoveTask(vol);
+		  }
+		  else {
+			  if ( data instanceof FSDataset ) {
+				  FSDataset dataset = (FSDataset)this.data;
+				  dataset.realDelVolume(vid);
+			  }
+			  else {
+				  throw new IOException("Block mover is supported only with FSDataset");
+			  }
+		  }
+	  }
+  }
+
+  public FSVolumeInfo[] listVolumes() throws IOException {
+	  return this.data.listVolumes();
+  }
+  
+  public void flushConfig() {
+		String dataDirs = this.storage.getDataDirs();
+		File old = new File("hdfs-site.xml");
+		if (old.exists()) {
+			old.renameTo(new File("hdfs-site.bak"));
+		}
+		DataOutputStream out = null;
+		try {
+			out = new DataOutputStream(new FileOutputStream(
+					new File("hdfs-site.xml")));
+			
+			conf.set("dfs.data.dir", dataDirs);
+			conf.writeXml(out);
+			out.flush();
+			out.close();
+		} catch (FileNotFoundException e) {
+		} catch (IOException e) {
+		} finally {
+			if (out != null) {
+				try {
+					out.close();
+				} catch (IOException e) {}
+			}
+		}
+  }
+  
+  public synchronized void realDelVolume(FSVolume volume) {
+	  if (volume != null && this.data instanceof FSDataset) {
+			long srcVid = volume.getVolumeId();
+			FSDataset dataset = (FSDataset) this.data;
+			File root = volume.getRoot();
+			dataset.realDelVolume(srcVid);
+			this.storage.delStorageDirectory(root);
+			blockScanner.delVolume(srcVid);
+			LOG.info("Remove the volume " + root + " successfully.");
+	   }
   }
 }

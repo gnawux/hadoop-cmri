@@ -75,6 +75,8 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
   DatanodeInfo srcDataNode = null;
   private Checksum partialCrc = null;
   private DataNode datanode = null;
+  private int writeTimeMilliSeconds = 0;
+  private int writeNumBytes = 0;
 
   BlockReceiver(Block block, DataInputStream in, String inAddr,
                 String myAddr, boolean isRecovery, String clientName, 
@@ -452,7 +454,12 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
       try {
         if (!finalized) {
           //finally write to the disk :
+          long writeStart = DataNode.now();
+
           out.write(pktBuf, dataOff, len);
+          
+          this.writeNumBytes += len;
+          this.writeTimeMilliSeconds += DataNode.now() - writeStart;
 
           // If this is a partial chunk, then verify that this is the only
           // chunk in the packet. Calculate new crc for this chunk.
@@ -528,6 +535,9 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
        * Receive until packet length is zero.
        */
       while (receivePacket() > 0) {}
+
+      this.datanode.data.setBlockWrittenOpTime(this.block, this.writeTimeMilliSeconds,
+    		  this.writeNumBytes);
 
       // flush the mirror out
       if (mirrorOut != null) {
