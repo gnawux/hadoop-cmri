@@ -639,27 +639,22 @@ public class FSDataset implements FSConstants, FSDatasetInterface {
     	if (this.volumes.size() > 1) {
     		while(volIt.hasNext()) {
     			tmpVol = volIt.next();
-        		if (tmpVol.getVolumeId() == vid) {
-        			if (tmpVol.getVolumeState() == FSVolumeState.VOL_STATE_NORMAL) {
-        				tmpVol.setVolumeState(FSVolumeState.VOL_STATE_LOCKED);
-        				vol = tmpVol;
-        				break;
-        			}
-        			else {
-        				throw new IOException("You can\'t delete the volume that is in process.");
-        			}
-        		}
-//        		if (tmpVol.getVolumeState() == FSVolumeState.VOL_STATE_LOCKED) {
-//    				throw new IOException("You can\'t delete the volume while the other is in process.");
-//    			}
+    			if (tmpVol.getVolumeState() == FSVolumeState.VOL_STATE_LOCKED) {
+  				  throw new IOException("You can\'t delete a volume while anyone is in waiting for processing.");
+  			    } else if ( (tmpVol.getVolumeId() == vid) && (tmpVol.getVolumeState() == FSVolumeState.VOL_STATE_NORMAL) ){
+    				tmpVol.setVolumeState(FSVolumeState.VOL_STATE_LOCKED);
+    				vol = tmpVol;
+    				break;
+    			} else if ( tmpVol.getVolumeId() == vid ){
+    				throw new IOException("You can\'t re-delete a volume while it is in processing.");
+    			}
         	}
     		if (vol != null) {
         		return vol;
         	}
-    		throw new IOException("the volume id " + vid + " isn\t exist.");
-    	}
-    	else {
-    		throw new IOException("the volume of current datanode is only one, you can't delete it.");
+    		throw new IOException("The volume id " + vid + " isn\t exist.");
+    	} else {
+    		throw new IOException("the volume of current datanode is only one, you can't delete one.");
     	}
     }
     
