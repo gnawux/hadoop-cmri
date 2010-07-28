@@ -202,7 +202,6 @@ class DataBlockScanner implements Runnable {
     
     info.lastLogTime = System.currentTimeMillis();
     if ( added ) {
-      LogFileHandler log = getLogFileHandler(info.block);
       updateBytesToScan(info.block.getNumBytes(), info.lastScanTime);
     }
   }
@@ -211,7 +210,6 @@ class DataBlockScanner implements Runnable {
     boolean exists = blockInfoSet.remove(info);
     blockMap.remove(info.block);
     if ( exists ) {
-        LogFileHandler log = getLogFileHandler(info.block);
       updateBytesToScan(-info.block.getNumBytes(), info.lastScanTime);
     }
   }
