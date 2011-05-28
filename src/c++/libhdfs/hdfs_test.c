@@ -52,13 +52,13 @@ void permission_disp(short permissions, char *rtr) {
 
 int main(int argc, char **argv) {
 
-    hdfsFS fs = hdfsConnect("default", 0);
+    hdfsFS fs = hdfsConnectNewInstance("default", 0);
     if(!fs) {
         fprintf(stderr, "Oops! Failed to connect to hdfs!\n");
         exit(-1);
     } 
  
-    hdfsFS lfs = hdfsConnect(NULL, 0);
+    hdfsFS lfs = hdfsConnectNewInstance(NULL, 0);
     if(!lfs) {
         fprintf(stderr, "Oops! Failed to connect to 'local' hdfs!\n");
         exit(-1);
@@ -397,11 +397,8 @@ int main(int argc, char **argv) {
 
       const char *tuser = "nobody";
       const char* writePath = "/tmp/usertestfile.txt";
-      const char **groups =  (const char**)malloc(sizeof(char*)* 2);
-      groups[0] = "users";
-      groups[1] = "nobody";
 
-      fs = hdfsConnectAsUser("default", 0, tuser, groups, 2);
+      fs = hdfsConnectAsUserNewInstance("default", 0, tuser);
       if(!fs) {
         fprintf(stderr, "Oops! Failed to connect to hdfs as user %s!\n",tuser);
         exit(-1);

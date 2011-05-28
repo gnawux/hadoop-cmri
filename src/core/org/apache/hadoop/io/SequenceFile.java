@@ -938,6 +938,13 @@ public class SequenceFile {
       }
     }
 
+    /** flush all currently written data to the file system */
+    public void syncFs() throws IOException {
+      if (out != null) {
+        out.sync();                               // flush contents to file system
+      }
+    }
+
     /** Returns the configuration of this file. */
     Configuration getConf() { return conf; }
     
@@ -1423,9 +1430,17 @@ public class SequenceFile {
       this.file = file;
       this.in = openFile(fs, file, bufferSize, length);
       this.conf = conf;
-      seek(start);
-      this.end = in.getPos() + length;
-      init(tempReader);
+      boolean succeeded = false;
+      try {
+        seek(start);
+        this.end = in.getPos() + length;
+        init(tempReader);
+        succeeded = true;
+      } finally {
+        if (!succeeded) {
+          IOUtils.cleanup(LOG, in);
+        }
+      }
     }
 
     /**

@@ -159,7 +159,18 @@
       rev="${commons-el.version}"
       conf="jetty->master"/>
 
+    <!--Configuration: secure datanode -->
+    <dependency org="commons-daemon" 
+      name="commons-daemon" 
+      rev="${commons-daemon.version}"
+      conf="server->default" /> 
 
+    <dependency org="com.jcraft"
+      name="jsch"
+      rev="${jsch.version}"
+      conf="common->master">
+    </dependency>
+    
     <!--Configuration: commons-logging -->
 
     <!--it is essential that only the master JAR of commons logging
@@ -260,6 +271,23 @@
       name="mockito-all"
       rev="${mockito-all.version}"
       conf="common->master"/>
-</dependencies>
-  
+    <dependency org="org.mortbay.jetty"
+      name="jetty-servlet-tester"
+      rev="${jetty.version}"
+      conf="common->default" />
+    <dependency org="org.codehaus.jackson"
+      name="jackson-mapper-asl"
+      rev="${jackson.version}"
+      conf="common->default"/>
+    <dependency org="org.aspectj"
+      name="aspectjrt"
+      rev="${aspectj.version}"
+      conf="common->default">
+    </dependency>
+    <dependency org="org.aspectj"
+      name="aspectjtools"
+      rev="${aspectj.version}"
+      conf="common->default">
+    </dependency>
+ </dependencies>
 </ivy-module>

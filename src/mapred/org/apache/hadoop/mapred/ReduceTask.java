@@ -48,6 +48,8 @@ import java.util.SortedSet;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 
+import javax.crypto.SecretKey;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -84,6 +86,8 @@ import org.apache.hadoop.util.Progress;
 import org.apache.hadoop.util.Progressable;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
+
+import org.apache.hadoop.mapreduce.security.SecureShuffleUtils;
 
 /** A Reduce task. */
 class ReduceTask extends Task {
@@ -150,8 +154,8 @@ class ReduceTask extends Task {
   }
 
   public ReduceTask(String jobFile, TaskAttemptID taskId,
-                    int partition, int numMaps) {
-    super(jobFile, taskId, partition);
+                    int partition, int numMaps, int numSlotsRequired) {
+    super(jobFile, taskId, partition, numSlotsRequired);
     this.numMaps = numMaps;
   }
   
@@ -167,9 +171,10 @@ class ReduceTask extends Task {
   }
 
   @Override
-  public TaskRunner createRunner(TaskTracker tracker, TaskInProgress tip) 
-  throws IOException {
-    return new ReduceTaskRunner(tip, tracker, this.conf);
+  public TaskRunner createRunner(TaskTracker tracker, TaskInProgress tip,
+                                 TaskTracker.RunningJob rjob
+                                 ) throws IOException {
+    return new ReduceTaskRunner(tip, tracker, this.conf, rjob);
   }
 
   @Override
@@ -209,7 +214,7 @@ class ReduceTask extends Task {
     if (isLocal) {
       // for local jobs
       for(int i = 0; i < numMaps; ++i) {
-        fileList.add(mapOutputFile.getInputFile(i, getTaskID()));
+        fileList.add(mapOutputFile.getInputFile(i));
       }
     } else {
       // for non local jobs
@@ -567,6 +572,12 @@ class ReduceTask extends Task {
     output.close(reducerContext);
   }
 
+  private static enum CopyOutputErrorType {
+    NO_ERROR,
+    READ_ERROR,
+    OTHER_ERROR
+  };
+
   class ReduceCopier<K, V> implements MRConstants {
 
     /** Reference to the umbilical object */
@@ -748,6 +759,11 @@ class ReduceTask extends Task {
     private static final int MIN_FETCH_RETRIES_PER_MAP = 2;
 
     /**
+     * The minimum percentage of maps yet to be copied, 
+     * which indicates end of shuffle
+     */
+    private static final float MIN_PENDING_MAPS_PERCENT = 0.25f;
+    /**
      * Maximum no. of unique maps from which we failed to fetch map-outputs
      * even after {@link #maxFetchRetriesPerMap} retries; after this the
      * reduce task is failed.
@@ -860,11 +876,18 @@ class ReduceTask extends Task {
       //a flag signifying whether a copy result is obsolete
       private static final int OBSOLETE = -2;
       
+      private CopyOutputErrorType error = CopyOutputErrorType.NO_ERROR;
       CopyResult(MapOutputLocation loc, long size) {
         this.loc = loc;
         this.size = size;
       }
-      
+
+      CopyResult(MapOutputLocation loc, long size, CopyOutputErrorType error) {
+        this.loc = loc;
+        this.size = size;
+        this.error = error;
+      }
+
       public boolean getSuccess() { return size >= 0; }
       public boolean isObsolete() { 
         return size == OBSOLETE;
@@ -872,9 +895,11 @@ class ReduceTask extends Task {
       public long getSize() { return size; }
       public String getHost() { return loc.getHost(); }
       public MapOutputLocation getLocation() { return loc; }
+      public CopyOutputErrorType getError() { return error; }
     }
     
     private int nextMapOutputCopierId = 0;
+    private boolean reportReadErrorImmediately;
     
     /**
      * Abstraction to track a map-output.
@@ -1115,19 +1140,31 @@ class ReduceTask extends Task {
       private final static int UNIT_CONNECT_TIMEOUT = 30 * 1000;
       // default read timeout (in milliseconds)
       private final static int DEFAULT_READ_TIMEOUT = 3 * 60 * 1000;
+      private final int shuffleConnectionTimeout;
+      private final int shuffleReadTimeout;
 
       private MapOutputLocation currentLocation = null;
       private int id = nextMapOutputCopierId++;
       private Reporter reporter;
+      private boolean readError = false;
       
       // Decompression of map-outputs
       private CompressionCodec codec = null;
       private Decompressor decompressor = null;
       
-      public MapOutputCopier(JobConf job, Reporter reporter) {
+      private final SecretKey jobTokenSecret;
+      
+      public MapOutputCopier(JobConf job, Reporter reporter, SecretKey jobTokenSecret) {
         setName("MapOutputCopier " + reduceTask.getTaskID() + "." + id);
         LOG.debug(getName() + " created");
         this.reporter = reporter;
+
+        this.jobTokenSecret = jobTokenSecret;
+ 
+        shuffleConnectionTimeout =
+          job.getInt("mapreduce.reduce.shuffle.connect.timeout", STALLED_COPY_TIMEOUT);
+        shuffleReadTimeout =
+          job.getInt("mapreduce.reduce.shuffle.read.timeout", DEFAULT_READ_TIMEOUT);
         
         if (job.getCompressMapOutput()) {
           Class<? extends CompressionCodec> codecClass =
@@ -1143,7 +1180,7 @@ class ReduceTask extends Task {
        */
       public synchronized boolean fail() {
         if (currentLocation != null) {
-          finish(-1);
+          finish(-1, CopyOutputErrorType.OTHER_ERROR);
           return true;
         } else {
           return false;
@@ -1161,11 +1198,11 @@ class ReduceTask extends Task {
         currentLocation = loc;
       }
       
-      private synchronized void finish(long size) {
+      private synchronized void finish(long size, CopyOutputErrorType error) {
         if (currentLocation != null) {
           LOG.debug(getName() + " finishing " + currentLocation + " =" + size);
           synchronized (copyResults) {
-            copyResults.add(new CopyResult(currentLocation, size));
+            copyResults.add(new CopyResult(currentLocation, size, error));
             copyResults.notify();
           }
           currentLocation = null;
@@ -1188,23 +1225,27 @@ class ReduceTask extends Task {
               }
               loc = scheduledCopies.remove(0);
             }
-            
+            CopyOutputErrorType error = CopyOutputErrorType.OTHER_ERROR;
+            readError = false;
             try {
               shuffleClientMetrics.threadBusy();
               start(loc);
               size = copyOutput(loc);
               shuffleClientMetrics.successFetch();
+              error = CopyOutputErrorType.NO_ERROR;
             } catch (IOException e) {
               LOG.warn(reduceTask.getTaskID() + " copy failed: " +
                        loc.getTaskAttemptId() + " from " + loc.getHost());
               LOG.warn(StringUtils.stringifyException(e));
               shuffleClientMetrics.failedFetch();
-              
+              if (readError) {
+                error = CopyOutputErrorType.READ_ERROR;
+              }
               // Reset 
               size = -1;
             } finally {
               shuffleClientMetrics.threadFree();
-              finish(size);
+              finish(size, error);
             }
           } catch (InterruptedException e) { 
             break; // ALL DONE
@@ -1248,12 +1289,11 @@ class ReduceTask extends Task {
         // else, we will check the localFS to find a suitable final location
         // for this path
         TaskAttemptID reduceId = reduceTask.getTaskID();
-        Path filename = new Path("/" + TaskTracker.getIntermediateOutputDir(
-                                 reduceId.getJobID().toString(),
-                                 reduceId.toString()) 
-                                 + "/map_" +
-                                 loc.getTaskId().getId() + ".out");
-        
+        Path filename =
+            new Path(String.format(
+                MapOutputFile.REDUCE_INPUT_FILE_FORMAT_STRING,
+                TaskTracker.OUTPUT, loc.getTaskId().getId()));
+
         // Copy the map output to a temp file whose name is unique to this attempt 
         Path tmpMapOutput = new Path(filename+"-"+id);
         
@@ -1344,11 +1384,11 @@ class ReduceTask extends Task {
                                      Path filename, int reduce)
       throws IOException, InterruptedException {
         // Connect
-        URLConnection connection = 
-          mapOutputLoc.getOutputLocation().openConnection();
-        InputStream input = getInputStream(connection, STALLED_COPY_TIMEOUT,
-                                           DEFAULT_READ_TIMEOUT); 
+        URL url = mapOutputLoc.getOutputLocation();
+        URLConnection connection = url.openConnection();
         
+        InputStream input = setupSecureConnection(mapOutputLoc, connection);
+ 
         // Validate header from map output
         TaskAttemptID mapId = null;
         try {
@@ -1387,8 +1427,10 @@ class ReduceTask extends Task {
               " arrived to reduce task " + reduce);
           return null;
         }
-        LOG.info("header: " + mapId + ", compressed len: " + compressedLength +
-                 ", decompressed len: " + decompressedLength);
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("header: " + mapId + ", compressed len: " + compressedLength +
+              ", decompressed len: " + decompressedLength);
+        }
 
         //We will put a file in memory if it meets certain criteria:
         //1. The size of the (decompressed) file should be less than 25% of 
@@ -1400,24 +1442,60 @@ class ReduceTask extends Task {
 
         // Shuffle
         MapOutput mapOutput = null;
-        if (shuffleInMemory) { 
-          LOG.info("Shuffling " + decompressedLength + " bytes (" + 
-              compressedLength + " raw bytes) " + 
-              "into RAM from " + mapOutputLoc.getTaskAttemptId());
+        if (shuffleInMemory) {
+          if (LOG.isDebugEnabled()) {
+            LOG.debug("Shuffling " + decompressedLength + " bytes (" + 
+                compressedLength + " raw bytes) " + 
+                "into RAM from " + mapOutputLoc.getTaskAttemptId());
+          }
 
           mapOutput = shuffleInMemory(mapOutputLoc, connection, input,
                                       (int)decompressedLength,
                                       (int)compressedLength);
         } else {
-          LOG.info("Shuffling " + decompressedLength + " bytes (" + 
-              compressedLength + " raw bytes) " + 
-              "into Local-FS from " + mapOutputLoc.getTaskAttemptId());
-
+          if (LOG.isDebugEnabled()) {
+            LOG.debug("Shuffling " + decompressedLength + " bytes (" + 
+                compressedLength + " raw bytes) " + 
+                "into Local-FS from " + mapOutputLoc.getTaskAttemptId());
+          }
+          
           mapOutput = shuffleToDisk(mapOutputLoc, input, filename, 
               compressedLength);
         }
             
         return mapOutput;
+      }
+      
+      private InputStream setupSecureConnection(MapOutputLocation mapOutputLoc, 
+          URLConnection connection) throws IOException {
+
+        // generate hash of the url
+        String msgToEncode = 
+          SecureShuffleUtils.buildMsgFrom(connection.getURL());
+        String encHash = SecureShuffleUtils.hashFromString(msgToEncode, 
+            jobTokenSecret);
+
+        // put url hash into http header
+        connection.setRequestProperty(
+            SecureShuffleUtils.HTTP_HEADER_URL_HASH, encHash);
+        
+        InputStream input = getInputStream(connection, shuffleConnectionTimeout,
+                                           shuffleReadTimeout); 
+
+        // get the replyHash which is HMac of the encHash we sent to the server
+        String replyHash = connection.getHeaderField(
+            SecureShuffleUtils.HTTP_HEADER_REPLY_URL_HASH);
+        if(replyHash==null) {
+          throw new IOException("security validation of TT Map output failed");
+        }
+        if (LOG.isDebugEnabled())
+          LOG.debug("url="+msgToEncode+";encHash="+encHash+";replyHash="
+              +replyHash);
+        // verify that replyHash is HMac of encHash
+        SecureShuffleUtils.verifyReply(replyHash, encHash, jobTokenSecret);
+        if (LOG.isDebugEnabled())
+          LOG.debug("for url="+msgToEncode+" sent hash and receievd reply");
+        return input;
       }
 
       /** 
@@ -1444,7 +1522,8 @@ class ReduceTask extends Task {
         connection.setConnectTimeout(unit);
         while (true) {
           try {
-            return connection.getInputStream();
+            connection.connect();
+            break;
           } catch (IOException ioe) {
             // update the total remaining connect-timeout
             connectionTimeout -= unit;
@@ -1463,6 +1542,12 @@ class ReduceTask extends Task {
             }
           }
         }
+        try {
+          return connection.getInputStream();
+        } catch (IOException ioe) {
+          readError = true;
+          throw ioe;
+        }
       }
 
       private MapOutput shuffleInMemory(MapOutputLocation mapOutputLoc,
@@ -1479,8 +1564,7 @@ class ReduceTask extends Task {
           // Reconnect
           try {
             connection = mapOutputLoc.getOutputLocation().openConnection();
-            input = getInputStream(connection, STALLED_COPY_TIMEOUT, 
-                                   DEFAULT_READ_TIMEOUT);
+            input = setupSecureConnection(mapOutputLoc, connection);
           } catch (IOException ioe) {
             LOG.info("Failed reopen connection to fetch map-output from " + 
                      mapOutputLoc.getHost());
@@ -1523,8 +1607,10 @@ class ReduceTask extends Task {
                            (shuffleData.length-bytesRead));
           }
 
-          LOG.info("Read " + bytesRead + " bytes from map-output for " +
-                   mapOutputLoc.getTaskAttemptId());
+          if (LOG.isDebugEnabled()) {
+            LOG.debug("Read " + bytesRead + " bytes from map-output for " +
+                mapOutputLoc.getTaskAttemptId());
+          }
 
           input.close();
         } catch (IOException ioe) {
@@ -1548,6 +1634,7 @@ class ReduceTask extends Task {
           IOUtils.cleanup(LOG, input);
 
           // Re-throw
+          readError = true;
           throw ioe;
         }
 
@@ -1578,13 +1665,15 @@ class ReduceTask extends Task {
         }
 
         // TODO: Remove this after a 'fix' for HADOOP-3647
-        if (mapOutputLength > 0) {
-          DataInputBuffer dib = new DataInputBuffer();
-          dib.reset(shuffleData, 0, shuffleData.length);
-          LOG.info("Rec #1 from " + mapOutputLoc.getTaskAttemptId() + " -> (" + 
-                   WritableUtils.readVInt(dib) + ", " + 
-                   WritableUtils.readVInt(dib) + ") from " + 
-                   mapOutputLoc.getHost());
+        if (LOG.isDebugEnabled()) {
+          if (mapOutputLength > 0) {
+            DataInputBuffer dib = new DataInputBuffer();
+            dib.reset(shuffleData, 0, shuffleData.length);
+            LOG.debug("Rec #1 from " + mapOutputLoc.getTaskAttemptId() + 
+                " -> (" + WritableUtils.readVInt(dib) + ", " + 
+                WritableUtils.readVInt(dib) + ") from " + 
+                mapOutputLoc.getHost());
+          }
         }
         
         return mapOutput;
@@ -1613,7 +1702,13 @@ class ReduceTask extends Task {
           output = rfs.create(localFilename);
           
           byte[] buf = new byte[64 * 1024];
-          int n = input.read(buf, 0, buf.length);
+          int n = -1;
+          try {
+            n = input.read(buf, 0, buf.length);
+          } catch (IOException ioe) {
+            readError = true;
+            throw ioe;
+          }
           while (n > 0) {
             bytesRead += n;
             shuffleClientMetrics.inputBytes(n);
@@ -1621,7 +1716,12 @@ class ReduceTask extends Task {
 
             // indicate we're making progress
             reporter.progress();
-            n = input.read(buf, 0, buf.length);
+            try {
+              n = input.read(buf, 0, buf.length);
+            } catch (IOException ioe) {
+              readError = true;
+              throw ioe;
+            }
           }
 
           LOG.info("Read " + bytesRead + " bytes from map-output for " +
@@ -1786,6 +1886,8 @@ class ReduceTask extends Task {
                                       );
       this.random = new Random(randomSeed);
       this.maxMapRuntime = 0;
+      this.reportReadErrorImmediately = 
+        conf.getBoolean("mapreduce.reduce.shuffle.notify.readerror", true);
     }
     
     private boolean busyEnough(int numInFlight) {
@@ -1811,7 +1913,8 @@ class ReduceTask extends Task {
       
       // start all the copying threads
       for (int i=0; i < numCopiers; i++) {
-        MapOutputCopier copier = new MapOutputCopier(conf, reporter);
+        MapOutputCopier copier = new MapOutputCopier(conf, reporter, 
+            reduceTask.getJobTokenSecret());
         copiers.add(copier);
         copier.start();
       }
@@ -2037,17 +2140,40 @@ class ReduceTask extends Task {
               mapTaskToFailedFetchesMap.put(mapTaskId, noFailedFetches);
               LOG.info("Task " + getTaskID() + ": Failed fetch #" + 
                        noFailedFetches + " from " + mapTaskId);
+
+              // half the number of max fetch retries per map during 
+              // the end of shuffle
+              int fetchRetriesPerMap = maxFetchRetriesPerMap;
+              int pendingCopies = numMaps - numCopied;
+              
+              // The check noFailedFetches != maxFetchRetriesPerMap is
+              // required to make sure of the notification in case of a
+              // corner case : 
+              // when noFailedFetches reached maxFetchRetriesPerMap and 
+              // reducer reached the end of shuffle, then we may miss sending
+              // a notification if the difference between 
+              // noFailedFetches and fetchRetriesPerMap is not divisible by 2 
+              if (pendingCopies <= numMaps * MIN_PENDING_MAPS_PERCENT &&
+                  noFailedFetches != maxFetchRetriesPerMap) {
+                fetchRetriesPerMap = fetchRetriesPerMap >> 1;
+              }
               
               // did the fetch fail too many times?
               // using a hybrid technique for notifying the jobtracker.
               //   a. the first notification is sent after max-retries 
               //   b. subsequent notifications are sent after 2 retries.   
-              if ((noFailedFetches >= maxFetchRetriesPerMap) 
-                  && ((noFailedFetches - maxFetchRetriesPerMap) % 2) == 0) {
+              //   c. send notification immediately if it is a read error and 
+              //       "mapreduce.reduce.shuffle.notify.readerror" set true.   
+              if ((reportReadErrorImmediately && cr.getError().equals(
+                  CopyOutputErrorType.READ_ERROR)) ||
+                 ((noFailedFetches >= fetchRetriesPerMap) 
+                  && ((noFailedFetches - fetchRetriesPerMap) % 2) == 0)) {
                 synchronized (ReduceTask.this) {
                   taskStatus.addFetchFailedMap(mapTaskId);
+                  reporter.progress();
                   LOG.info("Failed to fetch map-output from " + mapTaskId + 
                            " even after MAX_FETCH_RETRIES_PER_MAP retries... "
+                           + " or it is a read error, "
                            + " reporting to the JobTracker");
                 }
               }
@@ -2103,10 +2229,22 @@ class ReduceTask extends Task {
               // back off exponentially until num_retries <= max_retries
               // back off by max_backoff/2 on subsequent failed attempts
               currentTime = System.currentTimeMillis();
-              int currentBackOff = noFailedFetches <= maxFetchRetriesPerMap 
+              int currentBackOff = noFailedFetches <= fetchRetriesPerMap 
                                    ? BACKOFF_INIT 
                                      * (1 << (noFailedFetches - 1)) 
                                    : (this.maxBackoff * 1000 / 2);
+              // If it is read error,
+              //    back off for maxMapRuntime/2
+              //    during end of shuffle, 
+              //      backoff for min(maxMapRuntime/2, currentBackOff) 
+              if (cr.getError().equals(CopyOutputErrorType.READ_ERROR)) {
+                int backOff = maxMapRuntime >> 1;
+                if (pendingCopies <= numMaps * MIN_PENDING_MAPS_PERCENT) {
+                  backOff = Math.min(backOff, currentBackOff); 
+                } 
+                currentBackOff = backOff;
+              }
+
               penaltyBox.put(cr.getHost(), currentTime + currentBackOff);
               LOG.warn(reduceTask.getTaskID() + " adding host " +
                        cr.getHost() + " to penalty box, next contact in " +
@@ -2235,8 +2373,8 @@ class ReduceTask extends Task {
         if (numMemDiskSegments > 0 &&
               ioSortFactor > mapOutputFilesOnDisk.size()) {
           // must spill to disk, but can't retain in-mem for intermediate merge
-          final Path outputPath = mapOutputFile.getInputFileForWrite(mapId,
-                            reduceTask.getTaskID(), inMemToDiskBytes);
+          final Path outputPath =
+              mapOutputFile.getInputFileForWrite(mapId, inMemToDiskBytes);
           final RawKeyValueIterator rIter = Merger.merge(job, fs,
               keyClass, valueClass, memDiskSegments, numMemDiskSegments,
               tmpDir, comparator, reporter, spilledRecordsCounter, null);
@@ -2534,8 +2672,8 @@ class ReduceTask extends Task {
         long mergeOutputSize = createInMemorySegments(inMemorySegments, 0);
         int noInMemorySegments = inMemorySegments.size();
 
-        Path outputPath = mapOutputFile.getInputFileForWrite(mapId, 
-                          reduceTask.getTaskID(), mergeOutputSize);
+        Path outputPath =
+            mapOutputFile.getInputFileForWrite(mapId, mergeOutputSize);
 
         Writer writer = 
           new Writer(conf, rfs, outputPath,
@@ -2603,9 +2741,11 @@ class ReduceTask extends Task {
         do {
           try {
             int numNewMaps = getMapCompletionEvents();
-            if (numNewMaps > 0) {
-              LOG.info(reduceTask.getTaskID() + ": " +  
-                  "Got " + numNewMaps + " new map-outputs"); 
+            if (LOG.isDebugEnabled()) {
+              if (numNewMaps > 0) {
+                LOG.debug(reduceTask.getTaskID() + ": " +  
+                    "Got " + numNewMaps + " new map-outputs"); 
+              }
             }
             Thread.sleep(SLEEP_TIME);
           } 

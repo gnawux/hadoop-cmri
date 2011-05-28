@@ -25,9 +25,12 @@ import java.io.EOFException;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.FilterInputStream;
+import java.io.InputStream;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.lang.Math;
 import java.nio.channels.FileChannel;
@@ -36,6 +39,8 @@ import java.nio.ByteBuffer;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.FSConstants;
+import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
+import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.server.common.Storage;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
 import org.apache.hadoop.hdfs.server.namenode.FSImage.NameNodeDirType;
@@ -43,6 +48,7 @@ import org.apache.hadoop.hdfs.server.namenode.metrics.NameNodeMetrics;
 import org.apache.hadoop.io.*;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.permission.*;
+import org.apache.hadoop.security.token.delegation.DelegationKey;
 
 /**
  * FSEditLog maintains a log of the namespace modifications.
@@ -68,6 +74,11 @@ public class FSEditLog {
   private static final byte OP_CLEAR_NS_QUOTA = 12; // clear namespace quota
   private static final byte OP_TIMES = 13; // sets mod & access time on a file
   private static final byte OP_SET_QUOTA = 14; // sets name and disk quotas.
+  private static final byte OP_GET_DELEGATION_TOKEN = 15; //new delegation token
+  private static final byte OP_RENEW_DELEGATION_TOKEN = 16; //renew delegation token
+  private static final byte OP_CANCEL_DELEGATION_TOKEN = 17; //cancel delegation token
+  private static final byte OP_UPDATE_MASTER_KEY = 18; //update master key
+
   private static int sizeFlushBuffer = 512*1024;
 
   private ArrayList<EditLogOutputStream> editStreams = null;
@@ -83,7 +94,7 @@ public class FSEditLog {
   private long lastPrintTime;
 
   // is a sync currently running?
-  private boolean isSyncRunning;
+  private volatile boolean isSyncRunning;
 
   // these are statistics counters.
   private long numTransactions;        // number of transactions
@@ -308,6 +319,13 @@ public class FSEditLog {
     return editStreams == null ? 0 : editStreams.size();
   }
 
+  /**
+   * Return the current edit streams. This is for use from tests only!
+   */
+  ArrayList<EditLogOutputStream> getEditStreams() {
+    return editStreams;
+  }
+  
   boolean isOpen() {
     return getNumEditStreams() > 0;
   }
@@ -332,39 +350,24 @@ public class FSEditLog {
       } catch (IOException e) {
         FSNamesystem.LOG.warn("Unable to open edit log file " + eFile);
         // Remove the directory from list of storage directories
+        fsimage.removedStorageDirs.add(sd);
         it.remove();
       }
     }
   }
 
   public synchronized void createEditLogFile(File name) throws IOException {
+    waitForSyncToFinish();
     EditLogOutputStream eStream = new EditLogFileOutputStream(name);
     eStream.create();
     eStream.close();
   }
 
   /**
-   * Create edits.new if non existent.
-   */
-  synchronized void createNewIfMissing() throws IOException {
- for (Iterator<StorageDirectory> it = 
-       fsimage.dirIterator(NameNodeDirType.EDITS); it.hasNext();) {
-      File newFile = getEditNewFile(it.next());
-      if (!newFile.exists())
-        createEditLogFile(newFile);
-    }
-  }
-  
-  /**
    * Shutdown the file store.
    */
   public synchronized void close() throws IOException {
-    while (isSyncRunning) {
-      try {
-        wait(1000);
-      } catch (InterruptedException ie) { 
-      }
-    }
+    waitForSyncToFinish();
     if (editStreams == null) {
       return;
     }
@@ -378,6 +381,8 @@ public class FSEditLog {
         eStream.flush();
         eStream.close();
       } catch (IOException e) {
+        FSNamesystem.LOG.warn("FSEditLog:close - failed to close stream " 
+            + eStream.getName());
         processIOError(idx);
         idx--;
       }
@@ -399,9 +404,15 @@ public class FSEditLog {
     assert(index < getNumStorageDirs());
     assert(getNumStorageDirs() == editStreams.size());
     
+    EditLogFileOutputStream eStream = (EditLogFileOutputStream)editStreams.get(index);
     File parentStorageDir = ((EditLogFileOutputStream)editStreams
                                       .get(index)).getFile()
                                       .getParentFile().getParentFile();
+    
+    try {
+      eStream.close();
+    } catch (Exception e) {}
+    
     editStreams.remove(index);
     //
     // Invoke the ioerror routine of the fsimage
@@ -488,10 +499,19 @@ public class FSEditLog {
     int numOpAdd = 0, numOpClose = 0, numOpDelete = 0,
         numOpRename = 0, numOpSetRepl = 0, numOpMkDir = 0,
         numOpSetPerm = 0, numOpSetOwner = 0, numOpSetGenStamp = 0,
-        numOpTimes = 0, numOpOther = 0;
+        numOpTimes = 0, numOpGetDelegationToken = 0,
+        numOpRenewDelegationToken = 0, numOpCancelDelegationToken = 0,
+        numOpUpdateMasterKey = 0, numOpOther = 0;
+
     long startTime = FSNamesystem.now();
 
-    DataInputStream in = new DataInputStream(new BufferedInputStream(edits));
+    // Keep track of the file offsets of the last several opcodes.
+    // This is handy when manually recovering corrupted edits files.
+    PositionTrackingInputStream tracker = 
+      new PositionTrackingInputStream(new BufferedInputStream(edits));
+    long recentOpcodeOffsets[] = new long[4];
+
+    DataInputStream in = new DataInputStream(tracker);
     try {
       // Read log file version. Could be missing. 
       in.mark(4);
@@ -531,6 +551,8 @@ public class FSEditLog {
         } catch (EOFException e) {
           break; // no more transactions
         }
+        recentOpcodeOffsets[numEdits % recentOpcodeOffsets.length] =
+          tracker.getPos();
         numEdits++;
         switch (opcode) {
         case OP_ADD:
@@ -654,7 +676,7 @@ public class FSEditLog {
           String s = FSImage.readString(in);
           String d = FSImage.readString(in);
           timestamp = readLong(in);
-          FileStatus dinfo = fsDir.getFileInfo(d);
+          HdfsFileStatus dinfo = fsDir.getFileInfo(d);
           fsDir.unprotectedRenameTo(s, d, timestamp);
           fsNamesys.changeLease(s, d, dinfo);
           break;
@@ -776,11 +798,79 @@ public class FSEditLog {
           fsDir.unprotectedSetTimes(path, mtime, atime, true);
           break;
         }
+        case OP_GET_DELEGATION_TOKEN: {
+          if (logVersion > -19) {
+            throw new IOException("Unexpected opcode " + opcode
+                + " for version " + logVersion);
+          }
+          numOpGetDelegationToken++;
+          DelegationTokenIdentifier delegationTokenId = 
+              new DelegationTokenIdentifier();
+          delegationTokenId.readFields(in);
+          long expiryTime = readLong(in);
+          fsNamesys.getDelegationTokenSecretManager()
+              .addPersistedDelegationToken(delegationTokenId, expiryTime);
+          break;
+        }
+        case OP_RENEW_DELEGATION_TOKEN: {
+          if (logVersion > -19) {
+            throw new IOException("Unexpected opcode " + opcode
+                + " for version " + logVersion);
+          }
+          numOpRenewDelegationToken++;
+          DelegationTokenIdentifier delegationTokenId = 
+              new DelegationTokenIdentifier();
+          delegationTokenId.readFields(in);
+          long expiryTime = readLong(in);
+          fsNamesys.getDelegationTokenSecretManager()
+              .updatePersistedTokenRenewal(delegationTokenId, expiryTime);
+          break;
+        }
+        case OP_CANCEL_DELEGATION_TOKEN: {
+          if (logVersion > -19) {
+            throw new IOException("Unexpected opcode " + opcode
+                + " for version " + logVersion);
+          }
+          numOpCancelDelegationToken++;
+          DelegationTokenIdentifier delegationTokenId = 
+              new DelegationTokenIdentifier();
+          delegationTokenId.readFields(in);
+          fsNamesys.getDelegationTokenSecretManager()
+              .updatePersistedTokenCancellation(delegationTokenId);
+          break;
+        }
+        case OP_UPDATE_MASTER_KEY: {
+          if (logVersion > -19) {
+            throw new IOException("Unexpected opcode " + opcode
+                + " for version " + logVersion);
+          }
+          numOpUpdateMasterKey++;
+          DelegationKey delegationKey = new DelegationKey();
+          delegationKey.readFields(in);
+          fsNamesys.getDelegationTokenSecretManager().updatePersistedMasterKey(
+              delegationKey);
+          break;
+        }
         default: {
           throw new IOException("Never seen opcode " + opcode);
         }
         }
       }
+    } catch (IOException ioe) {
+      FSImage.LOG.error("Error replaying edit log at offset " +
+        tracker.getPos());
+      Arrays.sort(recentOpcodeOffsets);
+      StringBuilder sb = new StringBuilder();
+      for (long offset : recentOpcodeOffsets) {
+        if (offset != 0) {
+          sb.append(' ').append(offset);
+        }
+      }
+      if (!sb.toString().isEmpty()) {
+        FSImage.LOG.error("Last 4 opcodes at offsets:" +
+          sb);
+      }
+      throw ioe;
     } finally {
       in.close();
     }
@@ -796,6 +886,10 @@ public class FSEditLog {
           + " numOpSetOwner = " + numOpSetOwner
           + " numOpSetGenStamp = " + numOpSetGenStamp 
           + " numOpTimes = " + numOpTimes
+          + " numOpGetDelegationToken = " + numOpGetDelegationToken
+          + " numOpRenewDelegationToken = " + numOpRenewDelegationToken
+          + " numOpCancelDelegationToken = " + numOpCancelDelegationToken
+          + " numOpUpdateMasterKey = " + numOpUpdateMasterKey
           + " numOpOther = " + numOpOther);
     }
 
@@ -840,6 +934,7 @@ public class FSEditLog {
       try {
         eStream.write(op, writables);
       } catch (IOException ie) {
+        FSImage.LOG.warn("logEdit: removing "+ eStream.getName(), ie);
         processIOError(idx);         
         // processIOError will remove the idx's stream 
         // from the editStreams collection, so we need to update idx
@@ -863,9 +958,60 @@ public class FSEditLog {
       metrics.transactions.inc((end-start));
   }
 
-  //
-  // Sync all modifications done by this thread.
-  //
+  /**
+   * Blocks until all ongoing edits have been synced to disk.
+   * This differs from logSync in that it waits for edits that have been
+   * written by other threads, not just edits from the calling thread.
+   *
+   * NOTE: this should be done while holding the FSNamesystem lock, or
+   * else more operations can start writing while this is in progress.
+   */
+  void logSyncAll() throws IOException {
+    // Record the most recent transaction ID as our own id
+    synchronized (this) {
+      TransactionId id = myTransactionId.get();
+      id.txid = txid;
+    }
+    // Then make sure we're synced up to this point
+    logSync();
+  }
+
+  synchronized void waitForSyncToFinish() {
+    while (isSyncRunning) {
+      try {
+        wait(1000);
+      } catch (InterruptedException ie) {}
+    }
+  }
+  
+  /**
+   * Sync all modifications done by this thread.
+   *
+   * The internal concurrency design of this class is as follows:
+   *   - Log items are written synchronized into an in-memory buffer,
+   *     and each assigned a transaction ID.
+   *   - When a thread (client) would like to sync all of its edits, logSync()
+   *     uses a ThreadLocal transaction ID to determine what edit number must
+   *     be synced to.
+   *   - The isSyncRunning volatile boolean tracks whether a sync is currently
+   *     under progress.
+   *
+   * The data is double-buffered within each edit log implementation so that
+   * in-memory writing can occur in parallel with the on-disk writing.
+   *
+   * Each sync occurs in three steps:
+   *   1. synchronized, it swaps the double buffer and sets the isSyncRunning
+   *      flag.
+   *   2. unsynchronized, it flushes the data to storage
+   *   3. synchronized, it resets the flag and notifies anyone waiting on the
+   *      sync.
+   *
+   * The lack of synchronization on step 2 allows other threads to continue
+   * to write into the memory buffer while the sync is in progress.
+   * Because this step is unsynchronized, actions that need to avoid
+   * concurrency with sync() should be synchronized and also call
+   * waitForSyncToFinish() before assuming they are running alone.
+   */
   public void logSync() throws IOException {
     ArrayList<EditLogOutputStream> errorStreams = null;
     long syncStart = 0;
@@ -875,10 +1021,6 @@ public class FSEditLog {
 
     final int numEditStreams;
     synchronized (this) {
-      numEditStreams = editStreams.size();
-      assert numEditStreams > 0 : "no editlog streams";
-      printStatistics(false);
-
       // if somebody is already syncing, then wait
       while (mytxid > synctxid && isSyncRunning) {
         try {
@@ -886,6 +1028,7 @@ public class FSEditLog {
         } catch (InterruptedException ie) { 
         }
       }
+      printStatistics(false);
 
       //
       // If this transaction was already flushed, then nothing to do
@@ -896,6 +1039,9 @@ public class FSEditLog {
           metrics.transactionsBatchedInSync.inc();
         return;
       }
+
+      numEditStreams = editStreams.size();
+      assert numEditStreams > 0 : "no editlog streams";
    
       // now, this thread will do the sync
       syncStart = txid;
@@ -1090,7 +1236,31 @@ public class FSEditLog {
       FSEditLog.toLogLong(atime)};
     logEdit(OP_TIMES, new ArrayWritable(UTF8.class, info));
   }
-  
+
+  /**
+   * log delegation token to edit log
+   * @param id DelegationTokenIdentifier
+   * @param expiryTime of the token
+   * @return
+   */
+  void logGetDelegationToken(DelegationTokenIdentifier id,
+      long expiryTime) {
+    logEdit(OP_GET_DELEGATION_TOKEN, id, FSEditLog.toLogLong(expiryTime));
+  }
+
+  void logRenewDelegationToken(DelegationTokenIdentifier id,
+      long expiryTime) {
+    logEdit(OP_RENEW_DELEGATION_TOKEN, id, FSEditLog.toLogLong(expiryTime));
+  }
+
+  void logCancelDelegationToken(DelegationTokenIdentifier id) {
+    logEdit(OP_CANCEL_DELEGATION_TOKEN, id);
+  }
+
+  void logUpdateMasterKey(DelegationKey key) {
+    logEdit(OP_UPDATE_MASTER_KEY, key);
+  }
+
   static private UTF8 toLogReplication(short replication) {
     return new UTF8(Short.toString(replication));
   }
@@ -1106,9 +1276,16 @@ public class FSEditLog {
     assert(getNumStorageDirs() == editStreams.size());
     long size = 0;
     for (int idx = 0; idx < editStreams.size(); idx++) {
-      long curSize = editStreams.get(idx).length();
-      assert (size == 0 || size == curSize) : "All streams must be the same";
-      size = curSize;
+      EditLogOutputStream es = editStreams.get(idx);
+      try {
+        long curSize = es.length();
+        assert (size == 0 || size == curSize) : "All streams must be the same";
+        size = curSize;
+      } catch (IOException e) {
+        FSImage.LOG.warn("getEditLogSize: editstream.length failed. removing editlog (" +
+            idx + ") " + es.getName());
+        processIOError(idx);
+      }
     }
     return size;
   }
@@ -1118,6 +1295,7 @@ public class FSEditLog {
    * Returns the lastModified time of the edits log.
    */
   synchronized void rollEditLog() throws IOException {
+    waitForSyncToFinish();
     //
     // If edits.new already exists in some directory, verify it
     // exists in all directories.
@@ -1136,9 +1314,13 @@ public class FSEditLog {
 
     close();                     // close existing edit log
 
+    // check if any of failed storage is now available and put it back
+    fsimage.attemptRestoreRemovedStorage();
+    
     //
     // Open edits.new
     //
+    boolean failedSd = false;
     for (Iterator<StorageDirectory> it = 
            fsimage.dirIterator(NameNodeDirType.EDITS); it.hasNext();) {
       StorageDirectory sd = it.next();
@@ -1148,11 +1330,16 @@ public class FSEditLog {
         eStream.create();
         editStreams.add(eStream);
       } catch (IOException e) {
+        failedSd = true;
         // remove stream and this storage directory from list
-        processIOError(sd);
-       it.remove();
+        FSImage.LOG.warn("rollEdidLog: removing storage " + sd.getRoot().getPath());
+        sd.unlock();
+        fsimage.removedStorageDirs.add(sd);
+        it.remove();
       }
     }
+    if(failedSd)
+      fsimage.incrementCheckpointTime();  // update time for the valid ones
   }
 
   /**
@@ -1183,6 +1370,8 @@ public class FSEditLog {
         getEditFile(sd).delete();
         if (!getEditNewFile(sd).renameTo(getEditFile(sd))) {
           // Should we also remove from edits
+          NameNode.LOG.warn("purgeEditLog: removing failed storage " + sd.getRoot().getPath());
+          fsimage.removedStorageDirs.add(sd);
           it.remove(); 
         }
       }
@@ -1212,6 +1401,14 @@ public class FSEditLog {
     if(it.hasNext())
       return getEditFile(it.next()).lastModified();
     return 0;
+  }
+  
+  /**
+   * Return the txid of the last synced transaction.
+   * For test use only
+   */ 
+  synchronized long getSyncTxId() {
+    return synctxid;
   }
 
   // sets the initial capacity of the flush buffer.
@@ -1281,5 +1478,53 @@ public class FSEditLog {
       blocks[i].readFields(in);
     }
     return blocks;
+  }
+
+  /**
+   * Stream wrapper that keeps track of the current file position.
+   */
+  private static class PositionTrackingInputStream extends FilterInputStream {
+    private long curPos = 0;
+    private long markPos = -1;
+
+    public PositionTrackingInputStream(InputStream is) {
+      super(is);
+    }
+
+    public int read() throws IOException {
+      int ret = super.read();
+      if (ret != -1) curPos++;
+      return ret;
+    }
+
+    public int read(byte[] data) throws IOException {
+      int ret = super.read(data);
+      if (ret > 0) curPos += ret;
+      return ret;
+    }
+
+    public int read(byte[] data, int offset, int length) throws IOException {
+      int ret = super.read(data, offset, length);
+      if (ret > 0) curPos += ret;
+      return ret;
+    }
+
+    public void mark(int limit) {
+      super.mark(limit);
+      markPos = curPos;
+    }
+
+    public void reset() throws IOException {
+      if (markPos == -1) {
+        throw new IOException("Not marked!");
+      }
+      super.reset();
+      curPos = markPos;
+      markPos = -1;
+    }
+
+    public long getPos() {
+      return curPos;
+    }
   }
 }

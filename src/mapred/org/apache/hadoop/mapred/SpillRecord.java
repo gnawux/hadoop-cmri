@@ -17,20 +17,23 @@
  */
 package org.apache.hadoop.mapred;
 
+import java.io.DataInputStream;
+import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
-import java.util.zip.CRC32;
 import java.util.zip.CheckedInputStream;
 import java.util.zip.CheckedOutputStream;
 import java.util.zip.Checksum;
 
 import org.apache.hadoop.fs.ChecksumException;
-import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.io.SecureIOUtils;
+import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.util.PureJavaCrc32;
 
 import static org.apache.hadoop.mapred.MapTask.MAP_OUTPUT_INDEX_RECORD_LENGTH;
 
@@ -47,15 +50,18 @@ class SpillRecord {
     entries = buf.asLongBuffer();
   }
 
-  public SpillRecord(Path indexFileName, JobConf job) throws IOException {
-    this(indexFileName, job, new CRC32());
+  public SpillRecord(Path indexFileName, JobConf job, String expectedIndexOwner)
+  throws IOException {
+    this(indexFileName, job, new PureJavaCrc32(), expectedIndexOwner);
   }
 
-  public SpillRecord(Path indexFileName, JobConf job, Checksum crc)
-      throws IOException {
+  public SpillRecord(Path indexFileName, JobConf job, Checksum crc,
+      String expectedIndexOwner) throws IOException {
 
     final FileSystem rfs = FileSystem.getLocal(job).getRaw();
-    final FSDataInputStream in = rfs.open(indexFileName);
+    final DataInputStream in = 
+      new DataInputStream(SecureIOUtils.openForRead(
+         new File(indexFileName.toUri().getPath()), expectedIndexOwner));
     try {
       final long length = rfs.getFileStatus(indexFileName).getLen();
       final int partitions = (int) length / MAP_OUTPUT_INDEX_RECORD_LENGTH;
@@ -110,7 +116,7 @@ class SpillRecord {
    */
   public void writeToFile(Path loc, JobConf job)
       throws IOException {
-    writeToFile(loc, job, new CRC32());
+    writeToFile(loc, job, new PureJavaCrc32());
   }
 
   public void writeToFile(Path loc, JobConf job, Checksum crc)

@@ -15,6 +15,7 @@
 
     <conf name="common" visibility="private" 
       description="artifacts needed to compile/test the application"/>
+    <conf name="test" visibility="private" extends="runtime"/>
   </configurations>
 
   <publications>
@@ -77,6 +78,14 @@
     <dependency org="org.eclipse.jdt"
       name="core"
       rev="${core.version}"
+      conf="common->default"/>
+    <dependency org="org.codehaus.jackson"
+      name="jackson-mapper-asl"
+      rev="${jackson.version}"
+      conf="common->default"/>
+    <dependency org="org.codehaus.jackson"
+      name="jackson-core-asl"
+      rev="${jackson.version}"
       conf="common->default"/>
   </dependencies>
 </ivy-module>

@@ -222,7 +222,7 @@ int invokeMethod(JNIEnv *env, RetVal *retval, Exc *exc, MethType methType,
 }
 
 jarray constructNewArrayString(JNIEnv *env, Exc *exc, const char **elements, int size) {
-  const char *className = "Ljava/lang/String;";
+  const char *className = "java/lang/String";
   jobjectArray result;
   int i;
   jclass arrCls = (*env)->FindClass(env, className);
@@ -242,6 +242,7 @@ jarray constructNewArrayString(JNIEnv *env, Exc *exc, const char **elements, int
       fprintf(stderr, "ERROR: jelem == NULL\n");
     }
     (*env)->SetObjectArrayElement(env, result, i, jelem);
+    (*env)->DeleteLocalRef(env, jelem);
   }
   return result;
 }

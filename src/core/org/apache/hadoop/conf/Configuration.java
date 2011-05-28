@@ -27,10 +27,13 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.OutputStreamWriter;
 import java.io.Reader;
+import java.io.Writer;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -43,13 +46,17 @@ import java.util.Set;
 import java.util.StringTokenizer;
 import java.util.WeakHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.transform.Transformer;
+import javax.xml.transform.TransformerException;
 import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
@@ -60,7 +67,11 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.io.WritableUtils;
+import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
+import org.codehaus.jackson.JsonFactory;
+import org.codehaus.jackson.JsonGenerator;
+import org.w3c.dom.Comment;
 import org.w3c.dom.DOMException;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
@@ -147,6 +158,12 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
   private ArrayList<Object> resources = new ArrayList<Object>();
 
   /**
+   * The value reported as the setting resource when a key is set
+   * by code rather than a file resource.
+   */
+  static final String UNKNOWN_RESOURCE = "Unknown";
+
+  /**
    * List of configuration parameters marked <b>final</b>. 
    */
   private Set<String> finalParameters = new HashSet<String>();
@@ -154,7 +171,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
   private boolean loadDefaults = true;
   
   /**
-   * Configurtion objects
+   * Configuration objects
    */
   private static final WeakHashMap<Configuration,Object> REGISTRY = 
     new WeakHashMap<Configuration,Object>();
@@ -165,6 +182,15 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    */
   private static final CopyOnWriteArrayList<String> defaultResources =
     new CopyOnWriteArrayList<String>();
+
+  private static final ConcurrentMap<ClassLoader, Map<String, Class<?>>>
+    CACHE_CLASSES = new ConcurrentHashMap<ClassLoader, Map<String, Class<?>>>();
+  
+  /**
+   * Stores the mapping of key to the resource which modifies or loads 
+   * the key most recently
+   */
+  private HashMap<String, String> updatingResource;
   
   static{
     //print deprecation warning if hadoop-site.xml is found in classpath
@@ -207,9 +233,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    */
   public Configuration(boolean loadDefaults) {
     this.loadDefaults = loadDefaults;
-    if (LOG.isDebugEnabled()) {
-      LOG.debug(StringUtils.stringifyException(new IOException("config()")));
-    }
+    updatingResource = new HashMap<String, String>();
     synchronized(Configuration.class) {
       REGISTRY.put(this, null);
     }
@@ -222,11 +246,6 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    */
   @SuppressWarnings("unchecked")
   public Configuration(Configuration other) {
-    if (LOG.isDebugEnabled()) {
-      LOG.debug(StringUtils.stringifyException
-                (new IOException("config(config)")));
-    }
-   
    this.resources = (ArrayList)other.resources.clone();
    synchronized(other) {
      if (other.properties != null) {
@@ -236,6 +255,8 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
      if (other.overlay!=null) {
        this.overlay = (Properties)other.overlay.clone();
      }
+
+     this.updatingResource = new HashMap<String, String>(other.updatingResource);
    }
    
     this.finalParameters = new HashSet<String>(other.finalParameters);
@@ -249,13 +270,25 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    * added.
    * @param name file name. File should be present in the classpath.
    */
-  public static synchronized void addDefaultResource(String name) {
-    if(!defaultResources.contains(name)) {
+  public static void addDefaultResource(String name) {
+    // The lock heirarchy is that we must always lock
+    // instances before locking the class. Since reloadConfiguration
+    // is synchronized on the instance, we must not call conf.reloadConfiguration
+    // while holding a lock on Configuration.class. Otherwise we could deadlock
+    // if that conf is attempting to lock the Class
+    ArrayList<Configuration> toReload;
+    synchronized (Configuration.class) {
+      if(defaultResources.contains(name)) {
+        return;
+      }
       defaultResources.add(name);
-      for(Configuration conf : REGISTRY.keySet()) {
-        if(conf.loadDefaults) {
-          conf.reloadConfiguration();
-        }
+      // Make a copy so we don't iterate while not holding the lock
+      toReload = new ArrayList<Configuration>(REGISTRY.size());
+      toReload.addAll(REGISTRY.keySet());
+    }
+    for(Configuration conf : toReload) {
+      if(conf.loadDefaults) {
+        conf.reloadConfiguration();
       }
     }
   }
@@ -381,6 +414,29 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
   public String get(String name) {
     return substituteVars(getProps().getProperty(name));
   }
+  
+  /**
+   * Get the value of the <code>name</code> property as a trimmed <code>String</code>, 
+   * <code>null</code> if no such property exists. 
+   * If the key is deprecated, it returns the value of
+   * the first key which replaces the deprecated key and is not null
+   * 
+   * Values are processed for <a href="#VariableExpansion">variable expansion</a> 
+   * before being returned. 
+   * 
+   * @param name the property name.
+   * @return the value of the <code>name</code> or its replacing property, 
+   *         or null if no such property exists.
+   */
+  public String getTrimmed(String name) {
+    String value = get(name);
+    
+    if (null == value) {
+      return null;
+    } else {
+      return value.trim();
+    }
+  }
 
   /**
    * Get the value of the <code>name</code> property, without doing
@@ -403,6 +459,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
   public void set(String name, String value) {
     getOverlay().setProperty(name, value);
     getProps().setProperty(name, value);
+    updatingResource.put(name, UNKNOWN_RESOURCE);
   }
   
   /**
@@ -448,7 +505,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    *         or <code>defaultValue</code>. 
    */
   public int getInt(String name, int defaultValue) {
-    String valueString = get(name);
+    String valueString = getTrimmed(name);
     if (valueString == null)
       return defaultValue;
     try {
@@ -484,7 +541,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    *         or <code>defaultValue</code>. 
    */
   public long getLong(String name, long defaultValue) {
-    String valueString = get(name);
+    String valueString = getTrimmed(name);
     if (valueString == null)
       return defaultValue;
     try {
@@ -537,7 +594,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    *         or <code>defaultValue</code>. 
    */
   public float getFloat(String name, float defaultValue) {
-    String valueString = get(name);
+    String valueString = getTrimmed(name);
     if (valueString == null)
       return defaultValue;
     try {
@@ -567,7 +624,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    *         or <code>defaultValue</code>. 
    */
   public boolean getBoolean(String name, boolean defaultValue) {
-    String valueString = get(name);
+    String valueString = getTrimmed(name);
     if ("true".equals(valueString))
       return true;
     else if ("false".equals(valueString))
@@ -592,6 +649,69 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    */
   public void setBooleanIfUnset(String name, boolean value) {
     setIfUnset(name, Boolean.toString(value));
+  }
+
+  /**
+   * Get the value of the <code>name</code> property as a <ocde>Pattern</code>.
+   * If no such property is specified, or if the specified value is not a valid
+   * <code>Pattern</code>, then <code>DefaultValue</code> is returned.
+   *
+   * @param name property name
+   * @param defaultValue default value
+   * @return property value as a compiled Pattern, or defaultValue
+   */
+  public Pattern getPattern(String name, Pattern defaultValue) {
+    String valString = get(name);
+    if (null == valString || "".equals(valString)) {
+      return defaultValue;
+    }
+    try {
+      return Pattern.compile(valString);
+    } catch (PatternSyntaxException pse) {
+      LOG.warn("Regular expression '" + valString + "' for property '" +
+               name + "' not valid. Using default", pse);
+      return defaultValue;
+    }
+  }
+
+  /**
+   * Set the given property to <code>Pattern</code>.
+   * If the pattern is passed as null, sets the empty pattern which results in
+   * further calls to getPattern(...) returning the default value.
+   *
+   * @param name property name
+   * @param pattern new value
+   */
+  public void setPattern(String name, Pattern pattern) {
+    if (null == pattern) {
+      set(name, null);
+    } else {
+      set(name, pattern.pattern());
+    }
+  }
+
+  /**
+   * Set the value of the <code>name</code> property to the given type. This
+   * is equivalent to <code>set(&lt;name&gt;, value.toString())</code>.
+   * @param name property name
+   * @param value new value
+   */
+  public <T extends Enum<T>> void setEnum(String name, T value) {
+    set(name, value.toString());
+  }
+
+  /**
+   * Return value matching this enumerated type.
+   * @param name Property name
+   * @param defaultValue Value returned if no mapping exists
+   * @throws IllegalArgumentException If mapping is illegal for the type
+   * provided
+   */
+  public <T extends Enum<T>> T getEnum(String name, T defaultValue) {
+    final String val = get(name);
+    return null == val
+      ? defaultValue
+      : Enum.valueOf(defaultValue.getDeclaringClass(), val);
   }
 
   /**
@@ -739,6 +859,56 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
       return StringUtils.getStrings(valueString);
     }
   }
+  
+  /** 
+   * Get the comma delimited values of the <code>name</code> property as 
+   * a collection of <code>String</code>s, trimmed of the leading and trailing whitespace.  
+   * If no such property is specified then empty <code>Collection</code> is returned.
+   *
+   * @param name property name.
+   * @return property value as a collection of <code>String</code>s, or empty <code>Collection</code> 
+   */
+  public Collection<String> getTrimmedStringCollection(String name) {
+    String valueString = get(name);
+    if (null == valueString) {
+      Collection<String> empty = Collections.emptyList();
+      return empty;
+    }
+    return StringUtils.getTrimmedStringCollection(valueString);
+  }
+  
+  /** 
+   * Get the comma delimited values of the <code>name</code> property as 
+   * an array of <code>String</code>s, trimmed of the leading and trailing whitespace.
+   * If no such property is specified then an empty array is returned.
+   * 
+   * @param name property name.
+   * @return property value as an array of trimmed <code>String</code>s, 
+   *         or empty array. 
+   */
+  public String[] getTrimmedStrings(String name) {
+    String valueString = get(name);
+    return StringUtils.getTrimmedStrings(valueString);
+  }
+
+  /** 
+   * Get the comma delimited values of the <code>name</code> property as 
+   * an array of <code>String</code>s, trimmed of the leading and trailing whitespace.
+   * If no such property is specified then default value is returned.
+   * 
+   * @param name property name.
+   * @param defaultValue The default value
+   * @return property value as an array of trimmed <code>String</code>s, 
+   *         or default value. 
+   */
+  public String[] getTrimmedStrings(String name, String... defaultValue) {
+    String valueString = get(name);
+    if (null == valueString) {
+      return defaultValue;
+    } else {
+      return StringUtils.getTrimmedStrings(valueString);
+    }
+  }
 
   /** 
    * Set the array of string values for the <code>name</code> property as 
@@ -759,7 +929,24 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    * @throws ClassNotFoundException if the class is not found.
    */
   public Class<?> getClassByName(String name) throws ClassNotFoundException {
-    return Class.forName(name, true, classLoader);
+    Map<String, Class<?>> map = CACHE_CLASSES.get(classLoader);
+    if (map == null) {
+      Map<String, Class<?>> newMap = new ConcurrentHashMap<String, Class<?>>();
+      map = CACHE_CLASSES.putIfAbsent(classLoader, newMap);
+      if (map == null) {
+        map = newMap;
+      }
+    }
+
+    Class<?> clazz = map.get(name);
+    if (clazz == null) {
+      clazz = Class.forName(name, true, classLoader);
+      if (clazz != null) {
+        map.put(name, clazz);
+      }
+    }
+
+    return clazz;
   }
 
   /** 
@@ -775,7 +962,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    *         or <code>defaultValue</code>. 
    */
   public Class<?>[] getClasses(String name, Class<?> ... defaultValue) {
-    String[] classnames = getStrings(name);
+    String[] classnames = getTrimmedStrings(name);
     if (classnames == null)
       return defaultValue;
     try {
@@ -800,7 +987,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    *         or <code>defaultValue</code>. 
    */
   public Class<?> getClass(String name, Class<?> defaultValue) {
-    String valueString = get(name);
+    String valueString = getTrimmed(name);
     if (valueString == null)
       return defaultValue;
     try {
@@ -840,6 +1027,31 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
     } catch (Exception e) {
       throw new RuntimeException(e);
     }
+  }
+
+  /**
+   * Get the value of the <code>name</code> property as a <code>List</code>
+   * of objects implementing the interface specified by <code>xface</code>.
+   * 
+   * An exception is thrown if any of the classes does not exist, or if it does
+   * not implement the named interface.
+   * 
+   * @param name the property name.
+   * @param xface the interface implemented by the classes named by
+   *        <code>name</code>.
+   * @return a <code>List</code> of objects implementing <code>xface</code>.
+   */
+  @SuppressWarnings("unchecked")
+  public <U> List<U> getInstances(String name, Class<U> xface) {
+    List<U> ret = new ArrayList<U>();
+    Class<?>[] classes = getClasses(name);
+    for (Class<?> cl: classes) {
+      if (!xface.isAssignableFrom(cl)) {
+        throw new RuntimeException(cl + " does not implement " + xface);
+      }
+      ret.add((U)ReflectionUtils.newInstance(cl, this));
+    }
+    return ret;
   }
 
   /** 
@@ -978,8 +1190,12 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
     if (properties == null) {
       properties = new Properties();
       loadResources(properties, resources, quietmode);
-      if (overlay!= null)
+      if (overlay!= null) {
         properties.putAll(overlay);
+        for (Map.Entry<Object,Object> item: overlay.entrySet()) {
+          updatingResource.put((String) item.getKey(), UNKNOWN_RESOURCE);
+        }
+      }
     }
     return properties;
   }
@@ -1026,10 +1242,15 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
                              ArrayList resources,
                              boolean quiet) {
     if(loadDefaults) {
-      for (String resource : defaultResources) {
+      // To avoid addResource causing a ConcurrentModificationException
+      ArrayList<String> toLoad;
+      synchronized (Configuration.class) {
+        toLoad = new ArrayList<String>(defaultResources);
+      }
+      for (String resource : toLoad) {
         loadResource(properties, resource, quiet);
       }
-    
+
       //support the hadoop-site.xml as a deprecated case
       if(getResource("hadoop-site.xml")!=null) {
         loadResource(properties, "hadoop-site.xml", quiet);
@@ -1145,14 +1366,18 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
         }
         
         // Ignore this parameter if it has already been marked as 'final'
-        if (attr != null && value != null) {
-          if (!finalParameters.contains(attr)) {
-            properties.setProperty(attr, value);
-            if (finalParameter)
-              finalParameters.add(attr);
-          } else {
-            LOG.warn(name+":a attempt to override final parameter: "+attr
+        if (attr != null) {
+          if (value != null) {
+            if (!finalParameters.contains(attr)) {
+              properties.setProperty(attr, value);
+              updatingResource.put(attr, name.toString());
+            } else {
+              LOG.warn(name+":a attempt to override final parameter: "+attr
                      +";  Ignoring.");
+            }
+          }
+          if (finalParameter) {
+            finalParameters.add(attr);
           }
         }
       }
@@ -1173,52 +1398,121 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
   }
 
   /** 
-   * Write out the non-default properties in this configuration to the give
+   * Write out the non-default properties in this configuration to the given
    * {@link OutputStream}.
    * 
    * @param out the output stream to write to.
    */
   public void writeXml(OutputStream out) throws IOException {
-    Properties properties = getProps();
-    try {
-      Document doc =
-        DocumentBuilderFactory.newInstance().newDocumentBuilder().newDocument();
-      Element conf = doc.createElement("configuration");
-      doc.appendChild(conf);
-      conf.appendChild(doc.createTextNode("\n"));
-      for (Enumeration e = properties.keys(); e.hasMoreElements();) {
-        String name = (String)e.nextElement();
-        Object object = properties.get(name);
-        String value = null;
-        if (object instanceof String) {
-          value = (String) object;
-        }else {
-          continue;
-        }
-        Element propNode = doc.createElement("property");
-        conf.appendChild(propNode);
-      
-        Element nameNode = doc.createElement("name");
-        nameNode.appendChild(doc.createTextNode(name));
-        propNode.appendChild(nameNode);
-      
-        Element valueNode = doc.createElement("value");
-        valueNode.appendChild(doc.createTextNode(value));
-        propNode.appendChild(valueNode);
+    writeXml(new OutputStreamWriter(out));
+  }
 
-        conf.appendChild(doc.createTextNode("\n"));
-      }
-    
+  /** 
+   * Write out the non-default properties in this configuration to the given
+   * {@link Writer}.
+   * 
+   * @param out the writer to write to.
+   */
+  public void writeXml(Writer out) throws IOException {
+    Document doc = asXmlDocument();
+
+    try {
       DOMSource source = new DOMSource(doc);
       StreamResult result = new StreamResult(out);
       TransformerFactory transFactory = TransformerFactory.newInstance();
       Transformer transformer = transFactory.newTransformer();
+
+      // Important to not hold Configuration log while writing result, since
+      // 'out' may be an HDFS stream which needs to lock this configuration
+      // from another thread.
       transformer.transform(source, result);
-    } catch (Exception e) {
-      throw new RuntimeException(e);
+    } catch (TransformerException te) {
+      throw new IOException(te);
     }
   }
 
+  /**
+   * Return the XML DOM corresponding to this Configuration.
+   */
+  private synchronized Document asXmlDocument() throws IOException {
+    Document doc;
+    try {
+      doc =
+        DocumentBuilderFactory.newInstance().newDocumentBuilder().newDocument();
+    } catch (ParserConfigurationException pe) {
+      throw new IOException(pe);
+    }
+    Element conf = doc.createElement("configuration");
+    doc.appendChild(conf);
+    conf.appendChild(doc.createTextNode("\n"));
+    getProps(); // ensure properties is set
+    for (Enumeration e = properties.keys(); e.hasMoreElements();) {
+      String name = (String)e.nextElement();
+      Object object = properties.get(name);
+      String value = null;
+      if (object instanceof String) {
+        value = (String) object;
+      }else {
+        continue;
+      }
+      Element propNode = doc.createElement("property");
+      conf.appendChild(propNode);
+
+      if (updatingResource != null) {
+        Comment commentNode = doc.createComment(
+          "Loaded from " + updatingResource.get(name));
+        propNode.appendChild(commentNode);
+      }
+      Element nameNode = doc.createElement("name");
+      nameNode.appendChild(doc.createTextNode(name));
+      propNode.appendChild(nameNode);
+
+      Element valueNode = doc.createElement("value");
+      valueNode.appendChild(doc.createTextNode(value));
+      propNode.appendChild(valueNode);
+
+      conf.appendChild(doc.createTextNode("\n"));
+    }
+    return doc;
+  }
+
+  /**
+   *  Writes out all the parameters and their properties (final and resource) to
+   *  the given {@link Writer}
+   *  The format of the output would be 
+   *  { "properties" : [ {key1,value1,key1.isFinal,key1.resource}, {key2,value2,
+   *  key2.isFinal,key2.resource}... ] } 
+   *  It does not output the parameters of the configuration object which is 
+   *  loaded from an input stream.
+   * @param out the Writer to write to
+   * @throws IOException
+   */
+  public static void dumpConfiguration(Configuration config,
+      Writer out) throws IOException {
+    JsonFactory dumpFactory = new JsonFactory();
+    JsonGenerator dumpGenerator = dumpFactory.createJsonGenerator(out);
+    dumpGenerator.writeStartObject();
+    dumpGenerator.writeFieldName("properties");
+    dumpGenerator.writeStartArray();
+    dumpGenerator.flush();
+    synchronized (config) {
+      for (Map.Entry<Object,Object> item: config.getProps().entrySet()) {
+        dumpGenerator.writeStartObject();
+        dumpGenerator.writeStringField("key", (String) item.getKey());
+        dumpGenerator.writeStringField("value", 
+                                       config.get((String) item.getKey()));
+        dumpGenerator.writeBooleanField("isFinal",
+                                        config.finalParameters.contains(item.getKey()));
+        dumpGenerator.writeStringField("resource",
+                                       config.updatingResource.get(item.getKey()));
+        dumpGenerator.writeEndObject();
+      }
+    }
+    dumpGenerator.writeEndArray();
+    dumpGenerator.writeEndObject();
+    dumpGenerator.flush();
+  }
+  
   /**
    * Get the {@link ClassLoader} for this job.
    * 
@@ -1242,7 +1536,9 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
     StringBuffer sb = new StringBuffer();
     sb.append("Configuration: ");
     if(loadDefaults) {
-      toString(defaultResources, sb);
+      synchronized (Configuration.class) {
+        toString(defaultResources, sb);
+      }
       if(resources.size()>0) {
         sb.append(", ");
       }
@@ -1297,5 +1593,27 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
       org.apache.hadoop.io.Text.writeString(out, (String) item.getValue());
     }
   }
-
+  
+  /**
+   * get keys matching the the regex 
+   * @param regex
+   * @return Map<String,String> with matching keys
+   */
+  public Map<String,String> getValByRegex(String regex) {
+    Pattern p = Pattern.compile(regex);
+    
+    Map<String,String> result = new HashMap<String,String>();
+    Matcher m;
+    
+    for(Map.Entry<Object,Object> item: getProps().entrySet()) {
+      if (item.getKey() instanceof String && 
+          item.getValue() instanceof String) {
+        m = p.matcher((String)item.getKey());
+        if(m.find()) { // match
+          result.put((String) item.getKey(), (String) item.getValue());
+        }
+      }
+    }
+    return result;
+  }
 }

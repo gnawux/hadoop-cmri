@@ -39,13 +39,13 @@ int dfs_statfs(const char *path, struct statvfs *st)
   hdfsFS userFS;
   // if not connected, try to connect and fail out if we can't.
   if ((userFS = doConnectAsUser(dfs->nn_hostname,dfs->nn_port))== NULL) {
-    syslog(LOG_ERR, "ERROR: could not connect to dfs %s:%d\n", __FILE__, __LINE__);
+    ERROR("Could not connect");
     return -EIO;
   }
 
-  const long cap   = hdfsGetCapacity(userFS);
-  const long used  = hdfsGetUsed(userFS);
-  const long bsize = hdfsGetDefaultBlockSize(userFS);
+  const tOffset cap   = hdfsGetCapacity(userFS);
+  const tOffset used  = hdfsGetUsed(userFS);
+  const tOffset bsize = hdfsGetDefaultBlockSize(userFS);
 
   // fill in the statvfs structure
 

@@ -32,6 +32,7 @@ import org.apache.log4j.Level;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.Path;
@@ -39,8 +40,7 @@ import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.net.NetUtils;
-import org.apache.hadoop.tools.DistCp;
-import org.apache.hadoop.util.ToolRunner;
+import org.apache.hadoop.security.UserGroupInformation;
 
 /**
  * A JUnit test for HdfsProxy
@@ -51,7 +51,6 @@ public class TestHdfsProxy extends TestCase {
         .getLogger().setLevel(Level.OFF);
     ((Log4JLogger) DataNode.LOG).getLogger().setLevel(Level.OFF);
     ((Log4JLogger) FSNamesystem.LOG).getLogger().setLevel(Level.OFF);
-    ((Log4JLogger) DistCp.LOG).getLogger().setLevel(Level.ALL);
   }
 
   static final URI LOCAL_FS = URI.create("file:///");
@@ -204,12 +203,20 @@ public class TestHdfsProxy extends TestCase {
     MiniDFSCluster cluster = null;
     HdfsProxy proxy = null;
     try {
+      final UserGroupInformation CLIENT_UGI = UserGroupInformation.getCurrentUser();
+      final String testUser = CLIENT_UGI.getShortUserName();
+      final String testGroup = CLIENT_UGI.getGroupNames()[0];
 
       final Configuration dfsConf = new Configuration();
+      dfsConf.set("hadoop.proxyuser." + testUser + ".groups", testGroup);
+      dfsConf.set("hadoop.proxyuser." + testGroup + ".hosts",
+          "127.0.0.1,localhost");
+      dfsConf.set("hadoop.proxyuser." + testUser + ".hosts",
+          "127.0.0.1,localhost");
+      dfsConf.set("hadoop.security.authentication", "simple");
       cluster = new MiniDFSCluster(dfsConf, 2, true, null);
       cluster.waitActive();
 
-      final DistCp distcp = new DistCp(dfsConf);
       final FileSystem localfs = FileSystem.get(LOCAL_FS, dfsConf);
       final FileSystem hdfs = cluster.getFileSystem();
       final Configuration proxyConf = new Configuration(false);
@@ -219,12 +226,11 @@ public class TestHdfsProxy extends TestCase {
       final String namenode = hdfs.getUri().toString();
       if (namenode.startsWith("hdfs://")) {
         MyFile[] files = createFiles(LOCAL_FS, TEST_ROOT_DIR + "/srcdat");
-        ToolRunner.run(distcp, new String[] { "-log", namenode + "/logs",
-            "file:///" + TEST_ROOT_DIR + "/srcdat", namenode + "/destdat" });
+        hdfs.copyFromLocalFile
+	    (new Path("file:///" + TEST_ROOT_DIR + "/srcdat"),
+             new Path(namenode + "/destdat" ));
         assertTrue("Source and destination directories do not match.",
             checkFiles(hdfs, "/destdat", files));
-        assertTrue("Log directory does not exist.", hdfs.exists(new Path(
-            namenode + "/logs")));
 
         proxyConf.set("proxy.http.test.listener.addr", "localhost:0");
         proxy = new HdfsProxy(proxyConf);
@@ -232,15 +238,18 @@ public class TestHdfsProxy extends TestCase {
         InetSocketAddress proxyAddr = NetUtils.createSocketAddr("localhost:0");
         final String realProxyAddr = proxyAddr.getHostName() + ":"
             + proxy.getPort();
-
-        ToolRunner.run(distcp, new String[] {
-            "hftp://" + realProxyAddr + "/destdat", namenode + "/copied1" });
+        final Path proxyUrl = new Path("hftp://" + realProxyAddr);
+	final FileSystem hftp = proxyUrl.getFileSystem(dfsConf);
+        FileUtil.copy(hftp, new Path(proxyUrl, "/destdat"),
+                      hdfs, new Path(namenode + "/copied1"),
+                      false, true, proxyConf);
+        
         assertTrue("Source and copied directories do not match.", checkFiles(
             hdfs, "/copied1", files));
 
-        ToolRunner.run(distcp, new String[] {
-            "hftp://" + realProxyAddr + "/destdat",
-            "file:///" + TEST_ROOT_DIR + "/copied2" });
+        FileUtil.copy(hftp, new Path(proxyUrl, "/destdat"),
+                      localfs, new Path(TEST_ROOT_DIR + "/copied2"),
+                      false, true, proxyConf);
         assertTrue("Source and copied directories do not match.", checkFiles(
             localfs, TEST_ROOT_DIR + "/copied2", files));
 

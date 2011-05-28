@@ -25,10 +25,8 @@ interface MRConstants {
   //
   // Timeouts, constants
   //
-  public static final int HEARTBEAT_INTERVAL_MIN = 3 * 1000;
+  public static final int HEARTBEAT_INTERVAL_MIN_DEFAULT = 300;
   
-  public static final int CLUSTER_INCREMENT = 100;
-
   public static final long COUNTER_UPDATE_INTERVAL = 60 * 1000;
 
   //

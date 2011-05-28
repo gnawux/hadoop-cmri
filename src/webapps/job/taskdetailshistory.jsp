@@ -3,48 +3,66 @@
   import="javax.servlet.http.*"
   import="java.io.*"
   import="java.util.*"
+  import="org.apache.hadoop.http.HtmlQuoting"
   import="org.apache.hadoop.mapred.*"
+  import="org.apache.hadoop.fs.*"
   import="org.apache.hadoop.util.*"
   import="java.text.SimpleDateFormat"
   import="org.apache.hadoop.mapred.JobHistory.*"
 %>
-<jsp:include page="loadhistory.jsp">
-  <jsp:param name="jobid" value="<%=request.getParameter("jobid") %>"/>
-  <jsp:param name="jobTrackerId" value="<%=request.getParameter("jobTrackerId") %>"/>
-</jsp:include>
+
 <%!	private static SimpleDateFormat dateFormat = new SimpleDateFormat("d/MM HH:mm:ss") ; %>
 <%!	private static final long serialVersionUID = 1L;
 %>
 
 <%	
-  String jobid = request.getParameter("jobid");
   String logFile = request.getParameter("logFile");
+  String tipid = request.getParameter("tipid");
+  if (logFile == null || tipid == null) {
+    out.println("Missing job!!");
+    return;
+  }
   String encodedLogFileName = JobHistory.JobInfo.encodeJobHistoryFilePath(logFile);
-  String taskid = request.getParameter("taskid"); 
-  JobHistory.JobInfo job = (JobHistory.JobInfo)
-                              request.getSession().getAttribute("job");
-  JobHistory.Task task = job.getAllTasks().get(taskid); 
+  String jobid = JSPUtil.getJobID(new Path(encodedLogFileName).getName());
+  FileSystem fs = (FileSystem) application.getAttribute("fileSys");
+  JobTracker jobTracker = (JobTracker) application.getAttribute("job.tracker");
+  JobHistory.JobInfo job = JSPUtil.checkAccessAndGetJobInfo(request,
+      response, jobTracker, fs, new Path(logFile));
+  if (job == null) {
+    return;
+  }
+  JobHistory.Task task = job.getAllTasks().get(tipid); 
   String type = task.get(Keys.TASK_TYPE);
 %>
 <html>
+<head>
+<title><%=tipid %> attempts for <%=jobid %></title>
+<link rel="stylesheet" type="text/css" href="/static/hadoop.css">
+<link rel="icon" type="image/vnd.microsoft.icon" href="/static/images/favicon.ico" />
+</head>
 <body>
-<h2><%=taskid %> attempts for <a href="jobdetailshistory.jsp?jobid=<%=jobid%>&&logFile=<%=encodedLogFileName%>"> <%=jobid %> </a></h2>
+<h2><%=tipid %> attempts for <a href="jobdetailshistory.jsp?logFile=<%=encodedLogFileName%>"> <%=jobid %> </a></h2>
 <center>
-<table border="2" cellpadding="5" cellspacing="2">
-<tr><td>Task Id</td><td>Start Time</td>
+<table class="jobtasks datatable">
+<thead>
+<tr><th>Task Id</th><th>Start Time</th>
 <%	
   if (Values.REDUCE.name().equals(type)) {
 %>
-    <td>Shuffle Finished</td><td>Sort Finished</td>
+    <th>Shuffle Finished</th><th>Sort Finished</th>
 <%
   }
 %>
-<td>Finish Time</td><td>Host</td><td>Error</td><td>Task Logs</td></tr>
+<th>Finish Time</th><th>Host</th><th>Error</th><th>Task Logs</th>
+<th>Counters</th></tr>
+</thead>
+<tbody>
 <%
   for (JobHistory.TaskAttempt attempt : task.getTaskAttempts().values()) {
-    printTaskAttempt(attempt, type, out);
+    printTaskAttempt(attempt, type, out, encodedLogFileName);
   }
 %>
+</tbody>
 </table>
 </center>
 <%	
@@ -64,8 +82,9 @@
 %>
 <%!
   private void printTaskAttempt(JobHistory.TaskAttempt taskAttempt,
-                                String type, JspWriter out) 
-  throws IOException {
+                                String type, JspWriter out,
+                                String logFile) 
+  throws Exception {
     out.print("<tr>"); 
     out.print("<td>" + taskAttempt.get(Keys.TASK_ATTEMPT_ID) + "</td>");
     out.print("<td>" + StringUtils.getFormattedTimeWithDiff(dateFormat,
@@ -85,7 +104,8 @@
               taskAttempt.getLong(Keys.FINISH_TIME), 
               taskAttempt.getLong(Keys.START_TIME) ) + "</td>"); 
     out.print("<td>" + taskAttempt.get(Keys.HOSTNAME) + "</td>");
-    out.print("<td>" + taskAttempt.get(Keys.ERROR) + "</td>");
+    out.print("<td>" + HtmlQuoting.quoteHtmlChars(taskAttempt.get(Keys.ERROR)) +
+        "</td>");
 
     // Print task log urls
     out.print("<td>");	
@@ -101,6 +121,20 @@
         out.print("n/a");
     }
     out.print("</td>");
+    Counters counters = 
+      Counters.fromEscapedCompactString(taskAttempt.get(Keys.COUNTERS));
+    if (counters != null) {
+      TaskAttemptID attemptId = 
+        TaskAttemptID.forName(taskAttempt.get(Keys.TASK_ATTEMPT_ID));
+      TaskID tipid = attemptId.getTaskID();
+      org.apache.hadoop.mapreduce.JobID jobId = tipid.getJobID();
+      out.print("<td>" 
+       + "<a href=\"/taskstatshistory.jsp?attemptid=" + attemptId
+           + "&logFile=" + logFile + "\">"
+           + counters.size() + "</a></td>");
+    } else {
+      out.print("<td></td>");
+    }
     out.print("</tr>"); 
   }
 %>

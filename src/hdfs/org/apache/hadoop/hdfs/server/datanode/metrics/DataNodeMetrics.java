@@ -78,8 +78,6 @@ public class DataNodeMetrics implements Updater {
                 new MetricsTimeVaryingRate("readBlockOp", registry);
   public MetricsTimeVaryingRate writeBlockOp = 
                 new MetricsTimeVaryingRate("writeBlockOp", registry);
-  public MetricsTimeVaryingRate readMetadataOp = 
-                new MetricsTimeVaryingRate("readMetadataOp", registry);
   public MetricsTimeVaryingRate blockChecksumOp = 
                 new MetricsTimeVaryingRate("blockChecksumOp", registry);
   public MetricsTimeVaryingRate copyBlockOp = 
@@ -92,14 +90,14 @@ public class DataNodeMetrics implements Updater {
                     new MetricsTimeVaryingRate("blockReports", registry);
 
     
-  public DataNodeMetrics(Configuration conf, String storageId) {
+  public DataNodeMetrics(Configuration conf, String datanodeName) {
     String sessionId = conf.get("session.id"); 
     // Initiate reporting of Java VM metrics
     JvmMetrics.init("DataNode", sessionId);
     
 
     // Now the MBean for the data node
-    datanodeActivityMBean = new DataNodeActivityMBean(registry, storageId);
+    datanodeActivityMBean = new DataNodeActivityMBean(registry, datanodeName);
     
     // Create record for DataNode metrics
     MetricsContext context = MetricsUtil.getContext("dfs");
@@ -128,7 +126,6 @@ public class DataNodeMetrics implements Updater {
   public void resetAllMinMax() {
     readBlockOp.resetMinMax();
     writeBlockOp.resetMinMax();
-    readMetadataOp.resetMinMax();
     blockChecksumOp.resetMinMax();
     copyBlockOp.resetMinMax();
     replaceBlockOp.resetMinMax();

@@ -4,7 +4,9 @@
   import="javax.servlet.http.*"
   import="java.io.*"
   import="java.util.*"
+  import="org.apache.hadoop.http.HtmlQuoting"
   import="org.apache.hadoop.mapred.*"
+  import="org.apache.hadoop.mapred.JSPUtil.JobWithViewAccessCheck"
   import="org.apache.hadoop.util.*"
   import="java.lang.Integer"
   import="java.text.SimpleDateFormat"
@@ -13,7 +15,7 @@
 %>
 <%! static SimpleDateFormat dateFormat = new SimpleDateFormat("d-MMM-yyyy HH:mm:ss") ; %>
 <%
-  JobTracker tracker = (JobTracker) application.getAttribute("job.tracker");
+  final JobTracker tracker = (JobTracker) application.getAttribute("job.tracker");
   String trackerName = 
            StringUtils.simpleHostname(tracker.getJobTrackerMachine());
   String jobid = request.getParameter("jobid");
@@ -21,6 +23,16 @@
     out.println("<h2>Missing 'jobid'!</h2>");
     return;
   }
+  final JobID jobidObj = JobID.forName(jobid);
+
+  JobWithViewAccessCheck myJob = JSPUtil.checkAccessAndGetJob(tracker, jobidObj,
+      request, response);
+  if (!myJob.isViewJobAllowed()) {
+    return; // user is not authorized to view this job
+  }
+
+  JobInProgress job = myJob.getJob();
+
   String type = request.getParameter("type");
   String pagenum = request.getParameter("pagenum");
   String state = request.getParameter("state");
@@ -28,10 +40,6 @@
   int pnum = Integer.parseInt(pagenum);
   int next_page = pnum+1;
   int numperpage = 2000;
-  JobID jobidObj = JobID.forName(jobid);
-  JobInProgress job = tracker.getJob(jobidObj);
-  JobProfile profile = (job != null) ? (job.getProfile()) : null;
-  JobStatus status = (job != null) ? (job.getStatus()) : null;
   TaskReport[] reports = null;
   int start_index = (pnum - 1) * numperpage;
   int end_index = start_index + numperpage;
@@ -51,6 +59,7 @@
   <head>
     <title>Hadoop <%=type%> task list for <%=jobid%> on <%=trackerName%></title>
     <link rel="stylesheet" type="text/css" href="/static/hadoop.css">
+    <link rel="icon" type="image/vnd.microsoft.icon" href="/static/images/favicon.ico" />
   </head>
 <body>
 <h1>Hadoop <%=type%> task list for 
@@ -85,35 +94,36 @@
     out.print("<h2>" + Character.toUpperCase(state.charAt(0)) 
               + state.substring(1).toLowerCase() + " Tasks</h2>");
     out.print("<center>");
-    out.print("<table border=2 cellpadding=\"5\" cellspacing=\"2\">");
-    out.print("<tr><td align=\"center\">Task</td><td>Complete</td><td>Status</td>" +
-              "<td>Start Time</td><td>Finish Time</td><td>Errors</td><td>Counters</td></tr>");
+    out.print("<table class=\"jobtasks datatable\">");
+    out.print("<thead>");
+    out.print("<tr><th align=\"center\">Task</th><th>Complete</th><th>Status</th>" +
+              "<th>Start Time</th><th>Finish Time</th><th>Errors</th><th>Counters</th></tr>");
+    out.print("</thead><tbody>");
     if (end_index > report_len){
         end_index = report_len;
     }
     for (int i = start_index ; i < end_index; i++) {
           TaskReport report = reports[i];
-          out.print("<tr><td><a href=\"taskdetails.jsp?jobid=" + jobid + 
-                    "&tipid=" + report.getTaskID() + "\">"  + 
-                    report.getTaskID() + "</a></td>");
+          out.print("<tr><td><a href=\"taskdetails.jsp?tipid=" +
+            report.getTaskID() + "\">"  + report.getTaskID() + "</a></td>");
          out.print("<td>" + StringUtils.formatPercent(report.getProgress(),2) +
         		   ServletUtil.percentageGraph(report.getProgress() * 100f, 80) + "</td>");
-         out.print("<td>"  + report.getState() + "<br/></td>");
+         out.print("<td>"  + HtmlQuoting.quoteHtmlChars(report.getState()) + "<br/></td>");
          out.println("<td>" + StringUtils.getFormattedTimeWithDiff(dateFormat, report.getStartTime(),0) + "<br/></td>");
          out.println("<td>" + StringUtils.getFormattedTimeWithDiff(dateFormat, 
              report.getFinishTime(), report.getStartTime()) + "<br/></td>");
          String[] diagnostics = report.getDiagnostics();
          out.print("<td><pre>");
          for (int j = 0; j < diagnostics.length ; j++) {
-             out.println(diagnostics[j]);
+             out.println(HtmlQuoting.quoteHtmlChars(diagnostics[j]));
          }
          out.println("</pre><br/></td>");
          out.println("<td>" + 
-             "<a href=\"taskstats.jsp?jobid=" + jobid + 
-             "&tipid=" + report.getTaskID() +
+             "<a href=\"taskstats.jsp?tipid=" + report.getTaskID() +
              "\">" + report.getCounters().size() +
              "</a></td></tr>");
     }
+    out.print("</tbody>");
     out.print("</table>");
     out.print("</center>");
   }

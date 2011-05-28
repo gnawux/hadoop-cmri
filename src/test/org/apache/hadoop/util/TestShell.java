@@ -20,7 +20,14 @@ package org.apache.hadoop.util;
 import junit.framework.TestCase;
 
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadInfo;
+import java.lang.management.ThreadMXBean;
+import java.util.Timer;
 
 public class TestShell extends TestCase {
 
@@ -71,6 +78,67 @@ public class TestShell extends TestCase {
     assertInString(command, " .. ");
     assertInString(command, "\"arg 2\"");
   }
+  
+  public void testShellCommandTimeout() throws Throwable {
+    String rootDir = new File(System.getProperty(
+        "test.build.data", "/tmp")).getAbsolutePath();
+    File shellFile = new File(rootDir, "timeout.sh");
+    String timeoutCommand = "sleep 4; echo \"hello\"";
+    PrintWriter writer = new PrintWriter(new FileOutputStream(shellFile));
+    writer.println(timeoutCommand);
+    writer.close();
+    shellFile.setExecutable(true);
+    Shell.ShellCommandExecutor shexc 
+    = new Shell.ShellCommandExecutor(new String[]{shellFile.getAbsolutePath()},
+                                      null, null, 100);
+    try {
+      shexc.execute();
+    } catch (Exception e) {
+      //When timing out exception is thrown.
+    }
+    shellFile.delete();
+    assertTrue("Script didnt not timeout" , shexc.isTimedOut());
+  }
+  
+  private static int countTimerThreads() {
+    ThreadMXBean threadBean = ManagementFactory.getThreadMXBean();
+    
+    int count = 0;
+    ThreadInfo[] infos = threadBean.getThreadInfo(threadBean.getAllThreadIds(), 20);
+    for (ThreadInfo info : infos) {
+      if (info == null) continue;
+      for (StackTraceElement elem : info.getStackTrace()) {
+        if (elem.getClassName().contains("Timer")) {
+          count++;
+          break;
+        }
+      }
+    }
+    return count;
+  }
+  
+  public void testShellCommandTimerLeak() throws Exception {
+    String quickCommand[] = new String[] {"/bin/sleep", "100"};
+    
+    int timersBefore = countTimerThreads();
+    System.err.println("before: " + timersBefore);
+    
+    for (int i = 0; i < 10; i++) {
+      Shell.ShellCommandExecutor shexec = new Shell.ShellCommandExecutor(
+            quickCommand, null, null, 1);
+      try {
+        shexec.execute();
+        fail("Bad command should throw exception");
+      } catch (Exception e) {
+        // expected
+      }
+    }
+    Thread.sleep(1000);
+    int timersAfter = countTimerThreads();
+    System.err.println("after: " + timersAfter);
+    assertEquals(timersBefore, timersAfter);
+  }
+  
 
   private void testInterval(long interval) throws IOException {
     Command command = new Command(interval);

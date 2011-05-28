@@ -18,7 +18,11 @@
 
 package org.apache.hadoop.util;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import junit.framework.TestCase;
+import static org.junit.Assert.assertArrayEquals;
 
 public class TestStringUtils extends TestCase {
   final private static String NULL_STR = null;
@@ -117,5 +121,71 @@ public class TestStringUtils extends TestCase {
     assertEquals(0L, StringUtils.TraditionalBinaryPrefix.string2long("0"));
     assertEquals(-1259520L, StringUtils.TraditionalBinaryPrefix.string2long("-1230k"));
     assertEquals(956703965184L, StringUtils.TraditionalBinaryPrefix.string2long("891g"));
+  }
+
+  public void testGetTrimmedStrings() throws Exception {
+    String compactDirList = "/spindle1/hdfs,/spindle2/hdfs,/spindle3/hdfs";
+    String spacedDirList = "/spindle1/hdfs, /spindle2/hdfs, /spindle3/hdfs";
+    String pathologicalDirList1 = " /spindle1/hdfs  ,  /spindle2/hdfs ,/spindle3/hdfs ";
+    String pathologicalDirList2 = " /spindle1/hdfs  ,  /spindle2/hdfs ,/spindle3/hdfs , ";
+    String emptyList1 = "";
+    String emptyList2 = "   ";
+    
+    String[] expectedArray = {"/spindle1/hdfs", "/spindle2/hdfs", "/spindle3/hdfs"};
+    String[] emptyArray = {};
+    
+    assertArrayEquals(expectedArray, StringUtils.getTrimmedStrings(compactDirList));
+    assertArrayEquals(expectedArray, StringUtils.getTrimmedStrings(spacedDirList));
+    assertArrayEquals(expectedArray, StringUtils.getTrimmedStrings(pathologicalDirList1));
+    assertArrayEquals(expectedArray, StringUtils.getTrimmedStrings(pathologicalDirList2));
+    
+    assertArrayEquals(emptyArray, StringUtils.getTrimmedStrings(emptyList1));
+    assertArrayEquals(emptyArray, StringUtils.getTrimmedStrings(emptyList2));
+  } 
+
+  public void testJoin() {
+    List<String> s = new ArrayList<String>();
+    s.add("a");
+    s.add("b");
+    s.add("c");
+    assertEquals("", StringUtils.join(":", s.subList(0, 0)));
+    assertEquals("a", StringUtils.join(":", s.subList(0, 1)));
+    assertEquals("a:b", StringUtils.join(":", s.subList(0, 2)));
+    assertEquals("a:b:c", StringUtils.join(":", s.subList(0, 3)));
+  }
+
+  public void testCamelize() {
+    // common use cases
+    assertEquals("Map", StringUtils.camelize("MAP"));
+    assertEquals("JobSetup", StringUtils.camelize("JOB_SETUP"));
+    assertEquals("SomeStuff", StringUtils.camelize("some_stuff"));
+
+    // sanity checks for ascii alphabet against unexpected locale issues.
+    assertEquals("Aa", StringUtils.camelize("aA"));
+    assertEquals("Bb", StringUtils.camelize("bB"));
+    assertEquals("Cc", StringUtils.camelize("cC"));
+    assertEquals("Dd", StringUtils.camelize("dD"));
+    assertEquals("Ee", StringUtils.camelize("eE"));
+    assertEquals("Ff", StringUtils.camelize("fF"));
+    assertEquals("Gg", StringUtils.camelize("gG"));
+    assertEquals("Hh", StringUtils.camelize("hH"));
+    assertEquals("Ii", StringUtils.camelize("iI"));
+    assertEquals("Jj", StringUtils.camelize("jJ"));
+    assertEquals("Kk", StringUtils.camelize("kK"));
+    assertEquals("Ll", StringUtils.camelize("lL"));
+    assertEquals("Mm", StringUtils.camelize("mM"));
+    assertEquals("Nn", StringUtils.camelize("nN"));
+    assertEquals("Oo", StringUtils.camelize("oO"));
+    assertEquals("Pp", StringUtils.camelize("pP"));
+    assertEquals("Qq", StringUtils.camelize("qQ"));
+    assertEquals("Rr", StringUtils.camelize("rR"));
+    assertEquals("Ss", StringUtils.camelize("sS"));
+    assertEquals("Tt", StringUtils.camelize("tT"));
+    assertEquals("Uu", StringUtils.camelize("uU"));
+    assertEquals("Vv", StringUtils.camelize("vV"));
+    assertEquals("Ww", StringUtils.camelize("wW"));
+    assertEquals("Xx", StringUtils.camelize("xX"));
+    assertEquals("Yy", StringUtils.camelize("yY"));
+    assertEquals("Zz", StringUtils.camelize("zZ"));
   }
 }

@@ -5,6 +5,7 @@
   import="java.io.*"
   import="java.util.*"
   import="java.text.DecimalFormat"
+  import="org.apache.hadoop.http.HtmlQuoting"
   import="org.apache.hadoop.mapred.*"
   import="org.apache.hadoop.util.*"
 %>
@@ -16,9 +17,11 @@
 %>
 
 <html>
-
+<head>
 <title><%= trackerName %> Task Tracker Status</title>
-
+<link rel="stylesheet" type="text/css" href="/static/hadoop.css">
+<link rel="icon" type="image/vnd.microsoft.icon" href="/static/images/favicon.ico" />
+</head>
 <body>
 <h1><%= trackerName %> Task Tracker Status</h1>
 <img src="/static/hadoop-logo.jpg"/><br>
@@ -41,7 +44,9 @@
        out.print("</td><td>" + status.getRunState()); 
        out.print("</td><td>" + 
                  StringUtils.formatPercent(status.getProgress(), 2));
-       out.print("</td><td><pre>" + status.getDiagnosticInfo() + "</pre></td>");
+       out.print("</td><td><pre>" +
+           HtmlQuoting.quoteHtmlChars(status.getDiagnosticInfo()) +
+           "</pre></td>");
        out.print("</tr>\n");
      }
   %>
@@ -74,7 +79,9 @@
        out.print("</td><td>" + status.getRunState()); 
        out.print("</td><td>" + 
                  StringUtils.formatPercent(status.getProgress(), 2));
-       out.print("</td><td><pre>" + status.getDiagnosticInfo() + "</pre></td>");
+       out.print("</td><td><pre>" +
+           HtmlQuoting.quoteHtmlChars(status.getDiagnosticInfo()) +
+           "</pre></td>");
        out.print("</tr>\n");
      }
   %>

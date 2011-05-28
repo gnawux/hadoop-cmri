@@ -22,10 +22,17 @@ import java.io.*;
 import org.apache.hadoop.ipc.VersionedProtocol;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.hdfs.protocol.FSConstants.UpgradeAction;
+import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.server.common.UpgradeStatusReport;
 import org.apache.hadoop.fs.permission.*;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.fs.ContentSummary;
-import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.security.KerberosInfo;
+import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.security.token.TokenInfo;
+import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
+import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSelector;
 
 /**********************************************************************
  * ClientProtocol is used by user code via 
@@ -34,15 +41,18 @@ import org.apache.hadoop.fs.FileStatus;
  * as well as open/close file streams, etc.
  *
  **********************************************************************/
+@KerberosInfo(
+    serverPrincipal = DFSConfigKeys.DFS_NAMENODE_USER_NAME_KEY)
+@TokenInfo(DelegationTokenSelector.class)
 public interface ClientProtocol extends VersionedProtocol {
 
   /**
    * Compared to the previous version the following changes have been introduced:
    * (Only the latest change is reflected.
    * The log of historical changes can be retrieved from the svn).
-   * 41: saveNamespace introduced.
+   * 63: Remove getBlockLocations optimization
    */
-  public static final long versionID = 41L;
+  public static final long versionID = 63L;
   
   ///////////////////////////////////////
   // File contents
@@ -124,6 +134,16 @@ public interface ClientProtocol extends VersionedProtocol {
   public LocatedBlock append(String src, String clientName) throws IOException;
 
   /**
+   * Start lease recovery
+   * 
+   * @param src path of the file to start lease recovery
+   * @param clientName name of the current client
+   * @return true if the file is already closed
+   * @throws IOException
+   */
+  public boolean recoverLease(String src, String clientName) throws IOException;
+
+  /**
    * Set replication for an existing file.
    * <p>
    * The NameNode sets replication to the new value and returns.
@@ -174,9 +194,25 @@ public interface ClientProtocol extends VersionedProtocol {
    * addBlock() allocates a new block and datanodes the block data
    * should be replicated to.
    * 
+   * @deprecated use the 3-arg form below
    * @return LocatedBlock allocated block information.
    */
   public LocatedBlock addBlock(String src, String clientName) throws IOException;
+
+  /**
+   * A client that wants to write an additional block to the 
+   * indicated filename (which must currently be open for writing)
+   * should call addBlock().  
+   *
+   * addBlock() allocates a new block and datanodes the block data
+   * should be replicated to.
+   *
+   * @param excludedNodes a list of nodes that should not be allocated
+   * 
+   * @return LocatedBlock allocated block information.
+   */
+  public LocatedBlock addBlock(String src, String clientName,
+                               DatanodeInfo[] excludedNodes) throws IOException;
 
   /**
    * The client is done writing data to the given filename, and would 
@@ -255,9 +291,14 @@ public interface ClientProtocol extends VersionedProtocol {
   public boolean mkdirs(String src, FsPermission masked) throws IOException;
 
   /**
-   * Get a listing of the indicated directory
+   * Get a partial listing of the indicated directory
+   * 
+   * @param src the directory name
+   * @param startAfter the name of the last entry received by the client
+   * @return a partial listing starting after startAfter 
    */
-  public FileStatus[] getListing(String src) throws IOException;
+  public DirectoryListing getListing(String src, byte[] startAfter)
+  throws IOException;
 
   ///////////////////////////////////////
   // System issues and management
@@ -425,7 +466,7 @@ public interface ClientProtocol extends VersionedProtocol {
    * @return object containing information regarding the file
    *         or null if file not found
    */
-  public FileStatus getFileInfo(String src) throws IOException;
+  public HdfsFileStatus getFileInfo(String src) throws IOException;
 
   /**
    * Get {@link ContentSummary} rooted at the specified directory.
@@ -474,4 +515,32 @@ public interface ClientProtocol extends VersionedProtocol {
    *              by this call.
    */
   public void setTimes(String src, long mtime, long atime) throws IOException;
+
+  /**
+   * Get a valid Delegation Token.
+   *
+   * @param renewer the designated renewer for the token
+   * @return Token<DelegationTokenIdentifier>
+   * @throws IOException
+   */
+  public Token<DelegationTokenIdentifier> getDelegationToken(Text renewer) throws IOException;
+
+  /**
+   * Renew an existing delegation token.
+   *
+   * @param token delegation token obtained earlier
+   * @return the new expiration time
+   * @throws IOException
+   */
+  public long renewDelegationToken(Token<DelegationTokenIdentifier> token)
+      throws IOException;
+
+  /**
+   * Cancel an existing delegation token.
+   *
+   * @param token delegation token
+   * @throws IOException
+   */
+  public void cancelDelegationToken(Token<DelegationTokenIdentifier> token)
+      throws IOException;
 }

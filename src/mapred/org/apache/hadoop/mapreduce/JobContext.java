@@ -27,6 +27,8 @@ import org.apache.hadoop.mapreduce.Mapper;
 import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
 import org.apache.hadoop.mapreduce.lib.partition.HashPartitioner;
+import org.apache.hadoop.security.Credentials;
+import org.apache.hadoop.security.UserGroupInformation;
 
 /**
  * A read-only view of the job that is provided to the tasks while they
@@ -44,12 +46,47 @@ public class JobContext {
     "mapreduce.outputformat.class";
   protected static final String PARTITIONER_CLASS_ATTR = 
     "mapreduce.partitioner.class";
+  public static final String JAR_UNPACK_PATTERN = "mapreduce.job.jar.unpack.pattern";
 
   protected final org.apache.hadoop.mapred.JobConf conf;
-  private final JobID jobId;
+  protected final Credentials credentials;
+  private JobID jobId;
+
+  public static final String JOB_NAMENODES = "mapreduce.job.hdfs-servers";
+
+  public static final String JOB_ACL_VIEW_JOB = "mapreduce.job.acl-view-job";
+  public static final String JOB_ACL_MODIFY_JOB =
+    "mapreduce.job.acl-modify-job";
+
+  public static final String CACHE_FILE_VISIBILITIES = 
+    "mapreduce.job.cache.files.visibilities";
+  public static final String CACHE_ARCHIVES_VISIBILITIES = 
+    "mapreduce.job.cache.archives.visibilities";
+  
+  public static final String JOB_CANCEL_DELEGATION_TOKEN = 
+    "mapreduce.job.complete.cancel.delegation.tokens";
+  public static final String USER_LOG_RETAIN_HOURS = 
+    "mapred.userlog.retain.hours";
+  public static final String MAPREDUCE_TASK_CLASSPATH_PRECEDENCE = 
+    "mapreduce.task.classpath.user.precedence";
+  
+  /**
+   * The UserGroupInformation object that has a reference to the current user
+   */
+  protected UserGroupInformation ugi;
   
   public JobContext(Configuration conf, JobID jobId) {
     this.conf = new org.apache.hadoop.mapred.JobConf(conf);
+    this.credentials = this.conf.getCredentials();
+    this.jobId = jobId;
+    try {
+      this.ugi = UserGroupInformation.getCurrentUser();
+    } catch (IOException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  void setJobID(JobID jobId) {
     this.jobId = jobId;
   }
 
@@ -59,6 +96,14 @@ public class JobContext {
    */
   public Configuration getConfiguration() {
     return conf;
+  }
+
+  /**
+   * Get credentials for the job.
+   * @return credentials for the job
+   */
+  public Credentials getCredentials() {
+    return credentials;
   }
 
   /**
@@ -132,6 +177,16 @@ public class JobContext {
    */
   public String getJobName() {
     return conf.getJobName();
+  }
+  
+  /**
+   * Get the boolean value for the property that specifies which classpath
+   * takes precedence when tasks are launched. True - user's classes takes
+   * precedence. False - system's classes takes precedence.
+   * @return true if user's classes should take precedence
+   */
+  public boolean userClassesTakesPrecedence() {
+    return conf.userClassesTakesPrecedence();
   }
 
   /**

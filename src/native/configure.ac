@@ -41,6 +41,11 @@ AC_CONFIG_HEADER([config.h])
 
 AM_INIT_AUTOMAKE(hadoop,1.0.0)
 
+# Dont generate rules to re-automake if timestamps are off
+# since we check in the generated files and revision control
+# doesn't track timestamps
+AM_MAINTAINER_MODE
+
 # Checks for programs.
 AC_PROG_CC
 AC_PROG_LIBTOOL
@@ -88,12 +93,18 @@ AC_CHECK_HEADERS([zlib.h zconf.h], AC_COMPUTE_NEEDED_DSO(z,HADOOP_ZLIB_LIBRARY),
 
 # Checks for typedefs, structures, and compiler characteristics.
 AC_C_CONST
+AC_SYS_LARGEFILE
 
 # Checks for library functions.
 AC_CHECK_FUNCS([memset])
 
+# Check for nonstandard STRERROR_R
+AC_FUNC_STRERROR_R
+
 AC_CONFIG_FILES([Makefile
                  src/org/apache/hadoop/io/compress/zlib/Makefile
+                 src/org/apache/hadoop/io/nativeio/Makefile
+                 src/org/apache/hadoop/security/Makefile
                  lib/Makefile])
 AC_OUTPUT
 

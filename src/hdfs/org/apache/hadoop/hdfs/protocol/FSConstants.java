@@ -26,9 +26,6 @@ import org.apache.hadoop.conf.Configuration;
 public interface FSConstants {
   public static int MIN_BLOCKS_FOR_WRITE = 5;
 
-  // Chunk the block Invalidate message
-  public static final int BLOCK_INVALIDATE_CHUNK = 100;
-
   // Long that indicates "leave current quota unchanged"
   public static final long QUOTA_DONT_SET = Long.MAX_VALUE;
   public static final long QUOTA_RESET = -1L;
@@ -76,11 +73,17 @@ public interface FSConstants {
     FORCE_PROCEED;
   }
 
+  /**
+   * URI Scheme for hdfs://namenode/ URIs.
+   */
+  public static final String HDFS_URI_SCHEME = "hdfs";
+
   // Version is reflected in the dfs image and edit log files.
   // Version is reflected in the data storage file.
   // Versions are negative.
   // Decrement LAYOUT_VERSION to define a new version.
-  public static final int LAYOUT_VERSION = -18;
+  public static final int LAYOUT_VERSION = -19;
   // Current version: 
-  // Support disk space quotas
+  // -19: added new OP_[GET|RENEW|CANCEL]_DELEGATION_TOKEN and
+  // OP_UPDATE_MASTER_KEY.
 }

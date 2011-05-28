@@ -55,9 +55,111 @@ class JobTrackerInstrumentation {
   public void finalizeJob(JobConf conf, JobID id) 
   { }
   
-  public void addWaiting(JobID id, int tasks)
+  public void addWaitingMaps(JobID id, int task)
+  { }
+  
+  public void decWaitingMaps(JobID id, int task) 
+  { }
+  
+  public void addWaitingReduces(JobID id, int task)
+  { }
+  
+  public void decWaitingReduces(JobID id, int task)
   { }
 
-  public void decWaiting(JobID id, int tasks)
+  public void setMapSlots(int slots)
   { }
+
+  public void setReduceSlots(int slots)
+  { }
+
+  public void addBlackListedMapSlots(int slots)
+  { }
+
+  public void decBlackListedMapSlots(int slots)
+  { }
+
+  public void addBlackListedReduceSlots(int slots)
+  { }
+
+  public void decBlackListedReduceSlots(int slots)
+  { }
+
+  public void addReservedMapSlots(int slots)
+  { }
+
+  public void decReservedMapSlots(int slots)
+  { }
+
+  public void addReservedReduceSlots(int slots)
+  { }
+
+  public void decReservedReduceSlots(int slots)
+  { }
+
+  public void addOccupiedMapSlots(int slots)
+  { }
+
+  public void decOccupiedMapSlots(int slots)
+  { }
+
+  public void addOccupiedReduceSlots(int slots)
+  { }
+
+  public void decOccupiedReduceSlots(int slots)
+  { }
+
+  public void failedJob(JobConf conf, JobID id) 
+  { }
+
+  public void killedJob(JobConf conf, JobID id) 
+  { }
+
+  public void addPrepJob(JobConf conf, JobID id) 
+  { }
+  
+  public void decPrepJob(JobConf conf, JobID id) 
+  { }
+
+  public void addRunningJob(JobConf conf, JobID id) 
+  { }
+
+  public void decRunningJob(JobConf conf, JobID id) 
+  { }
+
+  public void addRunningMaps(int tasks)
+  { }
+
+  public void decRunningMaps(int tasks) 
+  { }
+
+  public void addRunningReduces(int tasks)
+  { }
+
+  public void decRunningReduces(int tasks)
+  { }
+
+  public void killedMap(TaskAttemptID taskAttemptID)
+  { }
+
+  public void killedReduce(TaskAttemptID taskAttemptID)
+  { }
+
+  public void addTrackers(int trackers)
+  { }
+
+  public void decTrackers(int trackers)
+  { }
+
+  public void addBlackListedTrackers(int trackers)
+  { }
+
+  public void decBlackListedTrackers(int trackers)
+  { }
+
+  public void setDecommissionedTrackers(int trackers)
+  { }   
+
+  public void heartbeat() {
+  }
 }

@@ -4,37 +4,55 @@
   import="java.io.*"
   import="java.util.*"
   import="org.apache.hadoop.fs.*"
+  import="org.apache.hadoop.http.HtmlQuoting"
   import="org.apache.hadoop.mapred.*"
   import="org.apache.hadoop.util.*"
-  import="java.text.SimpleDateFormat"
+  import="java.text.*"
   import="org.apache.hadoop.mapred.JobHistory.*"
+  import="java.security.PrivilegedExceptionAction"
+  import="org.apache.hadoop.security.AccessControlException"
+  import="org.apache.hadoop.mapreduce.JobACL"
+  import="org.apache.hadoop.security.authorize.AccessControlList"
 %>
 <%!	private static final long serialVersionUID = 1L;
 %>
-<jsp:include page="loadhistory.jsp">
-  <jsp:param name="jobid" value="<%=request.getParameter("jobid") %>"/>
-  <jsp:param name="logFile" value="<%=request.getParameter("logFile") %>"/>
-</jsp:include>
+
 <%! static SimpleDateFormat dateFormat = new SimpleDateFormat("d-MMM-yyyy HH:mm:ss") ; %>
 <%
-    String jobid = request.getParameter("jobid");
     String logFile = request.getParameter("logFile");
-	String encodedLogFileName = JobHistory.JobInfo.encodeJobHistoryFilePath(logFile);
+
+    String jobid = JSPUtil.getJobID(new Path(logFile).getName());
 	
-    Path jobFile = new Path(logFile);
-    String[] jobDetails = jobFile.getName().split("_");
-    String jobUniqueString = jobDetails[0] + "_" +jobDetails[1] + "_" + jobid ;
-	
-    JobInfo job = (JobInfo)request.getSession().getAttribute("job");
-    FileSystem fs = (FileSystem)request.getSession().getAttribute("fs");
+    FileSystem fs = (FileSystem) application.getAttribute("fileSys");
+    JobTracker jobTracker = (JobTracker) application.getAttribute("job.tracker");
+    JobHistory.JobInfo job = JSPUtil.checkAccessAndGetJobInfo(request,
+        response, jobTracker, fs, new Path(logFile));
+    if (job == null) {
+      return;
+    }
+
+  	String encodedLogFileName = JobHistory.JobInfo.encodeJobHistoryFilePath(logFile);
 %>
-<html><body>
+<html>
+<head>
+<title>
+Hadoop Job <%=jobid %> on History Viewer
+</title>
+<link rel="stylesheet" type="text/css" href="/static/hadoop.css">
+<link rel="icon" type="image/vnd.microsoft.icon" href="/static/images/favicon.ico" />
+</head>
+<body>
+
 <h2>Hadoop Job <%=jobid %> on <a href="jobhistory.jsp">History Viewer</a></h2>
 
-<b>User: </b> <%=job.get(Keys.USER) %><br/> 
-<b>JobName: </b> <%=job.get(Keys.JOBNAME) %><br/> 
-<b>JobConf: </b> <a href="jobconf_history.jsp?jobid=<%=jobid%>&jobLogDir=<%=new Path(logFile).getParent().toString()%>&jobUniqueString=<%=jobUniqueString%>"> 
+<b>User: </b> <%=HtmlQuoting.quoteHtmlChars(job.get(Keys.USER)) %><br/> 
+<b>JobName: </b> <%=HtmlQuoting.quoteHtmlChars(job.get(Keys.JOBNAME)) %><br/>  
+<b>JobConf: </b> <a href="jobconf_history.jsp?logFile=<%=encodedLogFileName%>"> 
                  <%=job.get(Keys.JOBCONF) %></a><br/> 
+<%         
+  Map<JobACL, AccessControlList> jobAcls = job.getJobACLs();
+  JSPUtil.printJobACLs(jobTracker, jobAcls, out);
+%> 
 <b>Submitted At: </b> <%=StringUtils.getFormattedTimeWithDiff(dateFormat, job.getLong(Keys.SUBMIT_TIME), 0 )  %><br/> 
 <b>Launched At: </b> <%=StringUtils.getFormattedTimeWithDiff(dateFormat, job.getLong(Keys.LAUNCH_TIME), job.getLong(Keys.SUBMIT_TIME)) %><br/>
 <b>Finished At: </b>  <%=StringUtils.getFormattedTimeWithDiff(dateFormat, job.getLong(Keys.FINISH_TIME), job.getLong(Keys.LAUNCH_TIME)) %><br/>
@@ -132,66 +150,129 @@
       }
     }
 %>
-<b><a href="analysejobhistory.jsp?jobid=<%=jobid %>&logFile=<%=encodedLogFileName%>">Analyse This Job</a></b> 
+<b><a href="analysejobhistory.jsp?logFile=<%=encodedLogFileName%>">Analyse This Job</a></b> 
 <hr/>
 <center>
-<table border="2" cellpadding="5" cellspacing="2">
+<table>
 <tr>
-<td>Kind</td><td>Total Tasks(successful+failed+killed)</td><td>Successful tasks</td><td>Failed tasks</td><td>Killed tasks</td><td>Start Time</td><td>Finish Time</td>
+<th>Kind</th><th>Total Tasks(successful+failed+killed)</th><th>Successful tasks</th><th>Failed tasks</th><th>Killed tasks</th><th>Start Time</th><th>Finish Time</th>
 </tr>
 <tr>
-<td>Setup</td>
-    <td><a href="jobtaskshistory.jsp?jobid=<%=jobid %>&logFile=<%=encodedLogFileName%>&taskType=<%=Values.SETUP.name() %>&status=all">
+<th>Setup</th>
+    <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.SETUP.name() %>&status=all">
         <%=totalSetups%></a></td>
-    <td><a href="jobtaskshistory.jsp?jobid=<%=jobid %>&logFile=<%=encodedLogFileName%>&taskType=<%=Values.SETUP.name() %>&status=<%=Values.SUCCESS %>">
+    <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.SETUP.name() %>&status=<%=Values.SUCCESS %>">
         <%=numFinishedSetups%></a></td>
-    <td><a href="jobtaskshistory.jsp?jobid=<%=jobid %>&logFile=<%=encodedLogFileName%>&taskType=<%=Values.SETUP.name() %>&status=<%=Values.FAILED %>">
+    <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.SETUP.name() %>&status=<%=Values.FAILED %>">
         <%=numFailedSetups%></a></td>
-    <td><a href="jobtaskshistory.jsp?jobid=<%=jobid %>&logFile=<%=encodedLogFileName%>&taskType=<%=Values.SETUP.name() %>&status=<%=Values.KILLED %>">
+    <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.SETUP.name() %>&status=<%=Values.KILLED %>">
         <%=numKilledSetups%></a></td>  
     <td><%=StringUtils.getFormattedTimeWithDiff(dateFormat, setupStarted, 0) %></td>
     <td><%=StringUtils.getFormattedTimeWithDiff(dateFormat, setupFinished, setupStarted) %></td>
 </tr>
 <tr>
-<td>Map</td>
-    <td><a href="jobtaskshistory.jsp?jobid=<%=jobid %>&logFile=<%=encodedLogFileName%>&taskType=<%=Values.MAP.name() %>&status=all">
+<th>Map</th>
+    <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.MAP.name() %>&status=all">
         <%=totalMaps %></a></td>
-    <td><a href="jobtaskshistory.jsp?jobid=<%=jobid %>&logFile=<%=encodedLogFileName%>&taskType=<%=Values.MAP.name() %>&status=<%=Values.SUCCESS %>">
+    <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.MAP.name() %>&status=<%=Values.SUCCESS %>">
         <%=job.getInt(Keys.FINISHED_MAPS) %></a></td>
-    <td><a href="jobtaskshistory.jsp?jobid=<%=jobid %>&logFile=<%=encodedLogFileName%>&taskType=<%=Values.MAP.name() %>&status=<%=Values.FAILED %>">
+    <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.MAP.name() %>&status=<%=Values.FAILED %>">
         <%=numFailedMaps %></a></td>
-    <td><a href="jobtaskshistory.jsp?jobid=<%=jobid %>&logFile=<%=encodedLogFileName%>&taskType=<%=Values.MAP.name() %>&status=<%=Values.KILLED %>">
+    <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.MAP.name() %>&status=<%=Values.KILLED %>">
         <%=numKilledMaps %></a></td>
     <td><%=StringUtils.getFormattedTimeWithDiff(dateFormat, mapStarted, 0) %></td>
     <td><%=StringUtils.getFormattedTimeWithDiff(dateFormat, mapFinished, mapStarted) %></td>
 </tr>
 <tr>
-<td>Reduce</td>
-    <td><a href="jobtaskshistory.jsp?jobid=<%=jobid %>&logFile=<%=encodedLogFileName%>&taskType=<%=Values.REDUCE.name() %>&status=all">
+<th>Reduce</th>
+    <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.REDUCE.name() %>&status=all">
         <%=totalReduces%></a></td>
-    <td><a href="jobtaskshistory.jsp?jobid=<%=jobid %>&logFile=<%=encodedLogFileName%>&taskType=<%=Values.REDUCE.name() %>&status=<%=Values.SUCCESS %>">
+    <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.REDUCE.name() %>&status=<%=Values.SUCCESS %>">
         <%=job.getInt(Keys.FINISHED_REDUCES)%></a></td>
-    <td><a href="jobtaskshistory.jsp?jobid=<%=jobid %>&logFile=<%=encodedLogFileName%>&taskType=<%=Values.REDUCE.name() %>&status=<%=Values.FAILED %>">
+    <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.REDUCE.name() %>&status=<%=Values.FAILED %>">
         <%=numFailedReduces%></a></td>
-    <td><a href="jobtaskshistory.jsp?jobid=<%=jobid %>&logFile=<%=encodedLogFileName%>&taskType=<%=Values.REDUCE.name() %>&status=<%=Values.KILLED %>">
+    <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.REDUCE.name() %>&status=<%=Values.KILLED %>">
         <%=numKilledReduces%></a></td>  
     <td><%=StringUtils.getFormattedTimeWithDiff(dateFormat, reduceStarted, 0) %></td>
     <td><%=StringUtils.getFormattedTimeWithDiff(dateFormat, reduceFinished, reduceStarted) %></td>
 </tr>
 <tr>
-<td>Cleanup</td>
-    <td><a href="jobtaskshistory.jsp?jobid=<%=jobid %>&logFile=<%=encodedLogFileName%>&taskType=<%=Values.CLEANUP.name() %>&status=all">
+<th>Cleanup</th>
+    <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.CLEANUP.name() %>&status=all">
         <%=totalCleanups%></a></td>
-    <td><a href="jobtaskshistory.jsp?jobid=<%=jobid %>&logFile=<%=encodedLogFileName%>&taskType=<%=Values.CLEANUP.name() %>&status=<%=Values.SUCCESS %>">
+    <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.CLEANUP.name() %>&status=<%=Values.SUCCESS %>">
         <%=numFinishedCleanups%></a></td>
-    <td><a href="jobtaskshistory.jsp?jobid=<%=jobid %>&logFile=<%=encodedLogFileName%>&taskType=<%=Values.CLEANUP.name() %>&status=<%=Values.FAILED %>">
+    <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.CLEANUP.name() %>&status=<%=Values.FAILED %>">
         <%=numFailedCleanups%></a></td>
-    <td><a href="jobtaskshistory.jsp?jobid=<%=jobid %>&logFile=<%=encodedLogFileName%>&taskType=<%=Values.CLEANUP.name() %>&status=<%=Values.KILLED %>">
+    <td><a href="jobtaskshistory.jsp?logFile=<%=encodedLogFileName%>&taskType=<%=Values.CLEANUP.name() %>&status=<%=Values.KILLED %>">
         <%=numKilledCleanups%></a></td>  
     <td><%=StringUtils.getFormattedTimeWithDiff(dateFormat, cleanupStarted, 0) %></td>
     <td><%=StringUtils.getFormattedTimeWithDiff(dateFormat, cleanupFinished, cleanupStarted) %></td>
 </tr>
 </table>
+
+<br>
+<br>
+
+<table border=2 cellpadding="5" cellspacing="2">
+  <tr>
+  <th><br/></th>
+  <th>Counter</th>
+  <th>Map</th>
+  <th>Reduce</th>
+  <th>Total</th>
+</tr>
+
+<%  
+
+ Counters totalCounters = 
+   Counters.fromEscapedCompactString(job.get(Keys.COUNTERS));
+ Counters mapCounters = 
+   Counters.fromEscapedCompactString(job.get(Keys.MAP_COUNTERS));
+ Counters reduceCounters = 
+   Counters.fromEscapedCompactString(job.get(Keys.REDUCE_COUNTERS));
+
+ if (totalCounters != null) {
+   for (String groupName : totalCounters.getGroupNames()) {
+     Counters.Group totalGroup = totalCounters.getGroup(groupName);
+     Counters.Group mapGroup = mapCounters.getGroup(groupName);
+     Counters.Group reduceGroup = reduceCounters.getGroup(groupName);
+  
+     Format decimal = new DecimalFormat();
+  
+     boolean isFirst = true;
+     Iterator<Counters.Counter> ctrItr = totalGroup.iterator();
+     while(ctrItr.hasNext()) {
+       Counters.Counter counter = ctrItr.next();
+       String name = counter.getDisplayName();
+       String mapValue = 
+         decimal.format(mapGroup.getCounter(name));
+       String reduceValue = 
+         decimal.format(reduceGroup.getCounter(name));
+       String totalValue = decimal.format(counter.getCounter());
+%>
+       <tr>
+<%
+       if (isFirst) {
+         isFirst = false;
+%>
+         <td rowspan="<%=totalGroup.size()%>">
+         <%=HtmlQuoting.quoteHtmlChars(totalGroup.getDisplayName())%></td>
+<%
+       }
+%>
+       <td><%=HtmlQuoting.quoteHtmlChars(counter.getDisplayName())%></td>
+       <td align="right"><%=mapValue%></td>
+       <td align="right"><%=reduceValue%></td>
+       <td align="right"><%=totalValue%></td>
+     </tr>
+<%
+      }
+    }
+  }
+%>
+</table>
+<br>
 
 <br/>
  <%
@@ -215,7 +296,7 @@
 <%
         for (String t : failedTasks) {
 %>
-          <a href="taskdetailshistory.jsp?jobid=<%=jobid%>&logFile=<%=encodedLogFileName%>&taskid=<%=t %>"><%=t %></a>,&nbsp;
+          <a href="taskdetailshistory.jsp?logFile=<%=encodedLogFileName%>&tipid=<%=t %>"><%=t %></a>,&nbsp;
 <%		  
         }
 %>	
@@ -227,6 +308,7 @@
  %>
 </table>
 <br/>
+
  <%
     DefaultJobHistoryParser.KilledOnNodesFilter killedFilter =
                  new DefaultJobHistoryParser.KilledOnNodesFilter();
@@ -248,7 +330,7 @@
 <%
         for (String t : killedTasks) {
 %>
-          <a href="taskdetailshistory.jsp?jobid=<%=jobid%>&logFile=<%=encodedLogFileName%>&taskid=<%=t %>"><%=t %></a>,&nbsp;
+          <a href="taskdetailshistory.jsp?logFile=<%=encodedLogFileName%>&tipid=<%=t %>"><%=t %></a>,&nbsp;
 <%		  
         }
 %>	

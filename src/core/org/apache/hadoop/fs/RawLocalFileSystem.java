@@ -26,6 +26,7 @@ import java.util.*;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.permission.*;
+import org.apache.hadoop.io.nativeio.NativeIO;
 import org.apache.hadoop.util.Progressable;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Shell;
@@ -40,6 +41,14 @@ public class RawLocalFileSystem extends FileSystem {
   
   public RawLocalFileSystem() {
     workingDir = new Path(System.getProperty("user.dir")).makeQualified(this);
+  }
+  
+  private Path makeAbsolute(Path f) {
+    if (f.isAbsolute()) {
+      return f;
+    } else {
+      return new Path(workingDir, f);
+    }
   }
   
   /** Convert a path to a File. */
@@ -321,12 +330,25 @@ public class RawLocalFileSystem extends FileSystem {
    */
   @Override
   public void setWorkingDirectory(Path newDir) {
-    workingDir = newDir;
+    workingDir = makeAbsolute(newDir);
+    checkPath(workingDir);
+    
   }
   
   @Override
   public Path getWorkingDirectory() {
     return workingDir;
+  }
+
+  /** {@inheritDoc} */
+  @Override
+  public FsStatus getStatus(Path p) throws IOException {
+    File partition = pathToFile(p == null ? new Path("/") : p);
+    //File provides getUsableSpace() and getFreeSpace()
+    //File provides no API to obtain used space, assume used = total - free
+    return new FsStatus(partition.getTotalSpace(), 
+      partition.getTotalSpace() - partition.getFreeSpace(),
+      partition.getFreeSpace());
   }
   
   // In the case of the local filesystem, we can just rename the file.
@@ -470,8 +492,13 @@ public class RawLocalFileSystem extends FileSystem {
   @Override
   public void setPermission(Path p, FsPermission permission
       ) throws IOException {
-    execCommand(pathToFile(p), Shell.SET_PERMISSION_COMMAND,
-        String.format("%04o", permission.toShort()));
+    if (NativeIO.isAvailable()) {
+      NativeIO.chmod(pathToFile(p).getCanonicalPath(),
+                     permission.toShort());
+    } else {
+      execCommand(pathToFile(p), Shell.SET_PERMISSION_COMMAND,
+          String.format("%05o", permission.toShort()));
+    }
   }
 
   private static String execCommand(File f, String... cmd) throws IOException {

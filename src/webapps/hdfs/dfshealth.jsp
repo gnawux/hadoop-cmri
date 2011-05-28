@@ -163,6 +163,9 @@
     ArrayList<DatanodeDescriptor> dead = new ArrayList<DatanodeDescriptor>();
     jspHelper.DFSNodesStatus(live, dead);
 
+    ArrayList<DatanodeDescriptor> decommissioning = fsn
+        .getDecommissioningNodes();
+	
     sorterField = request.getParameter("sorter/field");
     sorterOrder = request.getParameter("sorter/order");
     if ( sorterField == null )
@@ -188,13 +191,16 @@
     }
         
     counterReset();
-    
-    long total = fsn.getCapacityTotal();
-    long remaining = fsn.getCapacityRemaining();
-    long used = fsn.getCapacityUsed();
-    long nonDFS = fsn.getCapacityUsedNonDFS();
-    float percentUsed = fsn.getCapacityUsedPercent();
-    float percentRemaining = fsn.getCapacityRemainingPercent();
+    long[] fsnStats = fsn.getStats(); 
+    long total = fsnStats[0];
+    long remaining = fsnStats[2];
+    long used = fsnStats[1];
+    long nonDFS = total - remaining - used;
+	nonDFS = nonDFS < 0 ? 0 : nonDFS; 
+    float percentUsed = total <= 0 
+        ? 0f : ((float)used * 100.0f)/(float)total;
+    float percentRemaining = total <= 0 
+        ? 100f : ((float)remaining * 100.0f)/(float)total;
 
     out.print( "<div id=\"dfstable\"> <table>\n" +
 	       rowTxt() + colTxt() + "Configured Capacity" + colTxt() + ":" + colTxt() +
@@ -214,8 +220,14 @@
 	       		colTxt() + ":" + colTxt() + live.size() +
 	       rowTxt() + colTxt() +
 	       		"<a href=\"dfsnodelist.jsp?whatNodes=DEAD\">Dead Nodes</a> " +
-	       		colTxt() + ":" + colTxt() + dead.size() +
-               "</table></div><br>\n" );
+	       		colTxt() + ":" + colTxt() + dead.size() + rowTxt() + colTxt()
+				+ "<a href=\"dfsnodelist.jsp?whatNodes=DECOMMISSIONING\">"
+				+ "Decommissioning Nodes</a> "
+				+ colTxt() + ":" + colTxt() + decommissioning.size()
+				+ rowTxt() + colTxt()
+				+ "Number of Under-Replicated Blocks" + colTxt() + ":" + colTxt()
+				+ fsn.getUnderReplicatedBlocks()
+                + "</table></div><br>\n" );
     
     if (live.isEmpty() && dead.isEmpty()) {
         out.print("There are no datanodes in the cluster");
@@ -231,6 +243,7 @@
 <html>
 
 <link rel="stylesheet" type="text/css" href="/static/hadoop.css">
+<link rel="icon" type="image/vnd.microsoft.icon" href="/static/images/favicon.ico" />
 <title>Hadoop NameNode <%=namenodeLabel%></title>
     
 <body>

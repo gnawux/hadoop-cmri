@@ -21,25 +21,34 @@ package org.apache.hadoop.ipc;
 import java.io.IOException;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadInfo;
+import java.lang.management.ThreadMXBean;
 import java.lang.reflect.Method;
 
 import junit.framework.TestCase;
 
 import java.util.Arrays;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.commons.logging.*;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.io.UTF8;
 import org.apache.hadoop.io.Writable;
 
+import org.apache.hadoop.metrics.MetricsRecord;
+import org.apache.hadoop.metrics.spi.NullContext;
+import org.apache.hadoop.metrics.util.MetricsTimeVaryingRate;
 import org.apache.hadoop.net.NetUtils;
-import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.authorize.AuthorizationException;
-import org.apache.hadoop.security.authorize.ConfiguredPolicy;
 import org.apache.hadoop.security.authorize.PolicyProvider;
 import org.apache.hadoop.security.authorize.Service;
-import org.apache.hadoop.security.authorize.ServiceAuthorizationManager;
+import org.apache.hadoop.security.AccessControlException;
 
 /** Unit tests for RPC. */
 public class TestRPC extends TestCase {
@@ -68,9 +77,10 @@ public class TestRPC extends TestCase {
     int error() throws IOException;
     void testServerGet() throws IOException;
     int[] exchange(int[] values) throws IOException;
+    String toString();
   }
 
-  public class TestImpl implements TestProtocol {
+  public static class TestImpl implements TestProtocol {
     int fastPingCounter = 0;
     
     public long getProtocolVersion(String protocol, long clientVersion) {
@@ -230,8 +240,7 @@ public class TestRPC extends TestCase {
     }
   }
 
-
-  public void testCalls() throws Exception {
+  public void testCalls(Configuration conf) throws Exception {
     Server server = RPC.getServer(new TestImpl(), ADDRESS, 0, conf);
     TestProtocol proxy = null;
     try {
@@ -248,7 +257,26 @@ public class TestRPC extends TestCase {
 
     stringResult = proxy.echo((String)null);
     assertEquals(stringResult, null);
-
+    
+    // Check rpcMetrics 
+    server.rpcMetrics.doUpdates(new NullContext());
+    
+    // Number 4 includes getProtocolVersion()
+    assertEquals(4, server.rpcMetrics.rpcProcessingTime.getPreviousIntervalNumOps());
+    assertTrue(server.rpcMetrics.sentBytes.getPreviousIntervalValue() > 0);
+    assertTrue(server.rpcMetrics.receivedBytes.getPreviousIntervalValue() > 0);
+    
+    // Number of calls to echo method should be 2
+    server.rpcDetailedMetrics.doUpdates(new NullContext());
+    MetricsTimeVaryingRate metrics = 
+      (MetricsTimeVaryingRate)server.rpcDetailedMetrics.registry.get("echo");
+    assertEquals(2, metrics.getPreviousIntervalNumOps());
+    
+    // Number of calls to ping method should be 1
+    metrics = 
+      (MetricsTimeVaryingRate)server.rpcDetailedMetrics.registry.get("ping");
+    assertEquals(1, metrics.getPreviousIntervalNumOps());
+    
     String[] stringResults = proxy.echo(new String[]{"foo","bar"});
     assertTrue(Arrays.equals(stringResults, new String[]{"foo","bar"}));
 
@@ -337,9 +365,9 @@ public class TestRPC extends TestCase {
   }
   
   private void doRPCs(Configuration conf, boolean expectFailure) throws Exception {
-    SecurityUtil.setPolicy(new ConfiguredPolicy(conf, new TestPolicyProvider()));
-    
     Server server = RPC.getServer(new TestImpl(), ADDRESS, 0, 5, true, conf);
+
+    server.refreshServiceAcl(conf, new TestPolicyProvider());
 
     TestProtocol proxy = null;
 
@@ -366,13 +394,30 @@ public class TestRPC extends TestCase {
       if (proxy != null) {
         RPC.stopProxy(proxy);
       }
+      if (expectFailure) {
+        assertEquals("Wrong number of authorizationFailures ", 1,  
+            server.getRpcMetrics().authorizationFailures
+            .getCurrentIntervalValue());
+      } else {
+        assertEquals("Wrong number of authorizationSuccesses ", 1, 
+            server.getRpcMetrics().authorizationSuccesses
+            .getCurrentIntervalValue());
+      }
+      //since we don't have authentication turned ON, we should see 
+      // 0 for the authentication successes and 0 for failure
+      assertEquals("Wrong number of authenticationFailures ", 0, 
+          server.getRpcMetrics().authenticationFailures
+          .getCurrentIntervalValue());
+      assertEquals("Wrong number of authenticationSuccesses ", 0, 
+          server.getRpcMetrics().authenticationSuccesses
+          .getCurrentIntervalValue());
     }
   }
   
   public void testAuthorization() throws Exception {
     Configuration conf = new Configuration();
-    conf.setBoolean(
-        ServiceAuthorizationManager.SERVICE_AUTHORIZATION_CONFIG, true);
+    conf.setBoolean(CommonConfigurationKeys.HADOOP_SECURITY_AUTHORIZATION,
+        true);
     
     // Expect to succeed
     conf.set(ACL_CONFIG, "*");
@@ -382,10 +427,180 @@ public class TestRPC extends TestCase {
     conf.set(ACL_CONFIG, "invalid invalid");
     doRPCs(conf, true);
   }
+
+  public void testRPCInterrupted3() throws IOException, InterruptedException {
+    final Configuration conf = new Configuration();
+    Server server = RPC.getServer(
+      new TestImpl(), ADDRESS, 0, 5, true, conf);
+
+    server.start();
+
+    try {
+
+    int numConcurrentRPC = 200;
+    InetSocketAddress addr = NetUtils.getConnectAddress(server);
+    final CyclicBarrier barrier = new CyclicBarrier(numConcurrentRPC);
+    final CountDownLatch latch = new CountDownLatch(numConcurrentRPC);
+    final AtomicBoolean leaderRunning = new AtomicBoolean(true);
+    final AtomicReference<Throwable> error = new AtomicReference<Throwable>(null);
+    Thread leaderThread = null;
+    
+    for (int i = 0; i < numConcurrentRPC; i++) {
+      final int num = i;
+      final TestProtocol proxy = (TestProtocol) RPC.getProxy(
+      TestProtocol.class, TestProtocol.versionID, addr, conf);
+      Thread rpcThread = new Thread(new Runnable() {
+        @Override
+        public void run() {
+          try {
+            barrier.await();
+            while (num == 0 || leaderRunning.get()) {
+              proxy.slowPing(false);
+            }
+            
+            proxy.slowPing(false);
+          } catch (Exception e) {
+            if (num == 0) {
+              leaderRunning.set(false);
+            } else {
+              error.set(e);
+            }
+
+            LOG.error(e);
+          } finally {
+            latch.countDown();
+          }
+        }
+      });
+      rpcThread.start();
+
+      if (leaderThread == null) {
+       leaderThread = rpcThread;
+      }
+    }
+    // let threads get past the barrier
+    Thread.sleep(1000);
+
+    // stop a single thread
+    while (leaderRunning.get()) {
+      leaderThread.interrupt();
+    }
+
+    latch.await();
+    
+    // should not cause any other thread to get an error
+    assertNull("rpc got ClosedChannelException", error.get());
+
+    } finally {
+      server.stop();
+    }
+  }
+
+  public void testNoPings() throws Exception {
+    Configuration conf = new Configuration();
+   
+    conf.setBoolean("ipc.client.ping", false);
+    new TestRPC("testnoPings").testCalls(conf);
+   
+    conf.setInt(CommonConfigurationKeys.IPC_SERVER_RPC_READ_THREADS_KEY, 2);
+    new TestRPC("testnoPings").testCalls(conf);
+  }
+
+  /**
+   * Count the number of threads that have a stack frame containing
+   * the given string
+   */
+  private static int countThreads(String search) {
+    ThreadMXBean threadBean = ManagementFactory.getThreadMXBean();
+
+    int count = 0;
+    ThreadInfo[] infos = threadBean.getThreadInfo(threadBean.getAllThreadIds(), 20);
+    for (ThreadInfo info : infos) {
+      if (info == null) continue;
+      for (StackTraceElement elem : info.getStackTrace()) {
+        if (elem.getClassName().contains(search)) {
+          count++;
+          break;
+        }
+      }
+    }
+    return count;
+  }
+
+
+  /**
+   * Test that server.stop() properly stops all threads
+   */
+  public void testStopsAllThreads() throws Exception {
+    int threadsBefore = countThreads("Server$Listener$Reader");
+    assertEquals("Expect no Reader threads running before test",
+      0, threadsBefore);
+
+    final Server server = RPC.getServer(new TestImpl(), ADDRESS, 0, 2, false, conf);
+    server.start();
+    try {
+      int threadsRunning = countThreads("Server$Listener$Reader");
+      assertTrue(threadsRunning > 0);
+    } finally {
+      server.stop();
+    }
+    int threadsAfter = countThreads("Server$Listener$Reader");
+    assertEquals("Expect no Reader threads left running after test",
+      0, threadsAfter);
+  }
   
+  public void testErrorMsgForInsecureClient() throws Exception {
+    final Server server = RPC.getServer(
+        new TestImpl(), ADDRESS, 0, 5, true, conf, null);
+    server.enableSecurity();
+    server.start();
+    boolean succeeded = false;
+    final InetSocketAddress addr = NetUtils.getConnectAddress(server);
+    TestProtocol proxy = null;
+    try {
+      proxy = (TestProtocol) RPC.getProxy(TestProtocol.class,
+          TestProtocol.versionID, addr, conf);
+    } catch (RemoteException e) {
+      LOG.info("LOGGING MESSAGE: " + e.getLocalizedMessage());
+      assertTrue(e.unwrapRemoteException() instanceof AccessControlException);
+      succeeded = true;
+    } finally {
+      server.stop();
+      if (proxy != null) {
+        RPC.stopProxy(proxy);
+      }
+    }
+    assertTrue(succeeded);
+
+    conf.setInt(CommonConfigurationKeys.IPC_SERVER_RPC_READ_THREADS_KEY, 2);
+
+    final Server multiServer = RPC.getServer(new TestImpl(), 
+						ADDRESS, 0, 5, true, conf, null);
+    multiServer.enableSecurity();
+    multiServer.start();
+    succeeded = false;
+    final InetSocketAddress mulitServerAddr =
+                      NetUtils.getConnectAddress(multiServer);
+    proxy = null;
+    try {
+      proxy = (TestProtocol) RPC.getProxy(TestProtocol.class,
+          TestProtocol.versionID, mulitServerAddr, conf);
+    } catch (RemoteException e) {
+      LOG.info("LOGGING MESSAGE: " + e.getLocalizedMessage());
+      assertTrue(e.unwrapRemoteException() instanceof AccessControlException);
+      succeeded = true;
+    } finally {
+      multiServer.stop();
+      if (proxy != null) {
+        RPC.stopProxy(proxy);
+      }
+    }
+    assertTrue(succeeded);
+  }
+ 
   public static void main(String[] args) throws Exception {
 
-    new TestRPC("test").testCalls();
+    new TestRPC("test").testCalls(conf);
 
   }
 }

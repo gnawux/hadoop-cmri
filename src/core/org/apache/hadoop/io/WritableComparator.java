@@ -38,15 +38,40 @@ public class WritableComparator implements RawComparator {
     new HashMap<Class, WritableComparator>(); // registry
 
   /** Get a comparator for a {@link WritableComparable} implementation. */
-  public static synchronized WritableComparator get(Class<? extends WritableComparable> c) {
+  public static synchronized 
+  WritableComparator get(Class<? extends WritableComparable> c) {
     WritableComparator comparator = comparators.get(c);
-    if (comparator == null)
-      comparator = new WritableComparator(c, true);
+    if (comparator == null) {
+      // force the static initializers to run
+      forceInit(c);
+      // look to see if it is defined now
+      comparator = comparators.get(c);
+      // if not, use the generic one
+      if (comparator == null) {
+        comparator = new WritableComparator(c, true);
+      }
+    }
     return comparator;
   }
 
+  /**
+   * Force initialization of the static members.
+   * As of Java 5, referencing a class doesn't force it to initialize. Since
+   * this class requires that the classes be initialized to declare their
+   * comparators, we force that initialization to happen.
+   * @param cls the class to initialize
+   */
+  private static void forceInit(Class<?> cls) {
+    try {
+      Class.forName(cls.getName(), true, cls.getClassLoader());
+    } catch (ClassNotFoundException e) {
+      throw new IllegalArgumentException("Can't initialize class " + cls, e);
+    }
+  } 
+
   /** Register an optimized comparator for a {@link WritableComparable}
-   * implementation. */
+   * implementation. Comparators registered with this method must be
+   * thread-safe. */
   public static synchronized void define(Class c,
                                          WritableComparator comparator) {
     comparators.put(c, comparator);
@@ -135,11 +160,16 @@ public class WritableComparator implements RawComparator {
   }
 
   /** Compute hash for binary data. */
-  public static int hashBytes(byte[] bytes, int length) {
+  public static int hashBytes(byte[] bytes, int offset, int length) {
     int hash = 1;
-    for (int i = 0; i < length; i++)
+    for (int i = offset; i < offset + length; i++)
       hash = (31 * hash) + (int)bytes[i];
     return hash;
+  }
+  
+  /** Compute hash for binary data. */
+  public static int hashBytes(byte[] bytes, int length) {
+    return hashBytes(bytes, 0, length);
   }
 
   /** Parse an unsigned short from a byte array. */

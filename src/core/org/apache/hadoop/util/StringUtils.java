@@ -319,6 +319,29 @@ public class StringUtils {
     return values;
   }
 
+  /**
+   * Splits a comma separated value <code>String</code>, trimming leading and trailing whitespace on each value.
+   * @param str a comma separated <String> with values
+   * @return a <code>Collection</code> of <code>String</code> values
+   */
+  public static Collection<String> getTrimmedStringCollection(String str){
+    return Arrays.asList(getTrimmedStrings(str));
+  }
+  
+  /**
+   * Splits a comma separated value <code>String</code>, trimming leading and trailing whitespace on each value.
+   * @param str a comma separated <String> with values
+   * @return an array of <code>String</code> values
+   */
+  public static String[] getTrimmedStrings(String str){
+    if (null == str || "".equals(str.trim())) {
+      return emptyStringArray;
+    }
+
+    return str.trim().split("\\s*,\\s*");
+  }
+
+  final public static String[] emptyStringArray = {};
   final public static char COMMA = ',';
   final public static String COMMA_STR = ",";
   final public static char ESCAPE_CHAR = '\\';
@@ -429,8 +452,12 @@ public class StringUtils {
     if (str == null) {
       return null;
     }
-    StringBuilder result = new StringBuilder();
-    for (int i=0; i<str.length(); i++) {
+    int len = str.length();
+    // Let us specify good enough capacity to constructor of StringBuilder sothat
+    // resizing would not be needed(to improve perf).
+    StringBuilder result = new StringBuilder((int)(len * 1.5));
+
+    for (int i=0; i<len; i++) {
       char curChar = str.charAt(i);
       if (curChar == escapeChar || hasChar(charsToEscape, curChar)) {
         // special char
@@ -684,5 +711,76 @@ public class StringUtils {
 
   public static synchronized String limitDecimalTo2(double d) {
     return decimalFormat.format(d);
+  }
+  
+  /**
+   * Concatenates strings, using a separator.
+   *
+   * @param separator Separator to join with.
+   * @param strings Strings to join.
+   * @return  the joined string
+   */
+  public static String join(CharSequence separator, Iterable<String> strings) {
+    StringBuilder sb = new StringBuilder();
+    boolean first = true;
+    for (String s : strings) {
+      if (first) {
+        first = false;
+      } else {
+        sb.append(separator);
+      }
+      sb.append(s);
+    }
+    return sb.toString();
+  }
+  
+  /**
+   * Concatenates stringified objects, using a separator.
+   *
+   * @param separator Separator to join with.
+   * @param objects Objects to join.
+   */
+  public static String joinObjects(
+	  CharSequence separator, Iterable<? extends Object> objects) {
+    StringBuffer sb = new StringBuffer();
+    boolean first = true;
+    for (Object o : objects) {
+      if (first) {
+        first = false;
+      } else {
+        sb.append(separator);
+      }
+      sb.append(String.valueOf(o));
+    }
+    return sb.toString();
+  }  
+
+  /**
+   * Capitalize a word
+   *
+   * @param s the input string
+   * @return capitalized string
+   */
+  public static String capitalize(String s) {
+    int len = s.length();
+    if (len == 0) return s;
+    return new StringBuilder(len).append(Character.toTitleCase(s.charAt(0)))
+                                 .append(s.substring(1)).toString();
+  }
+
+  /**
+   * Convert SOME_STUFF to SomeStuff
+   *
+   * @param s input string
+   * @return camelized string
+   */
+  public static String camelize(String s) {
+    StringBuilder sb = new StringBuilder();
+    String[] words = split(s.toLowerCase(Locale.US), ESCAPE_CHAR, '_');
+
+    for (String word : words)
+      sb.append(capitalize(word));
+
+    return sb.toString();
   }
 }

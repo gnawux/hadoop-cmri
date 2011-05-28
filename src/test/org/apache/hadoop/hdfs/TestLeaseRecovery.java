@@ -27,6 +27,8 @@ import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.TestInterDatanodeProtocol;
+import org.apache.hadoop.hdfs.server.datanode.FSDatasetTestUtil;
+
 import org.apache.hadoop.hdfs.server.protocol.BlockMetaDataInfo;
 import org.apache.hadoop.hdfs.server.protocol.InterDatanodeProtocol;
 
@@ -49,12 +51,22 @@ public class TestLeaseRecovery extends junit.framework.TestCase {
     return m;
   }
 
+  public void testBlockSynchronization() throws Exception {
+    runTestBlockSynchronization(false);
+  }
+  public void testBlockSynchronizationWithZeroBlock() throws Exception {
+    runTestBlockSynchronization(true);
+  }
+
+
   /**
    * The following test first creates a file with a few blocks.
    * It randomly truncates the replica of the last block stored in each datanode.
    * Finally, it triggers block synchronization to synchronize all stored block.
+   * @param forceOneBlockToZero if true, will truncate one block to 0 length
    */
-  public void testBlockSynchronization() throws Exception {
+  public void runTestBlockSynchronization(boolean forceOneBlockToZero)
+  throws Exception {
     final int ORG_FILE_SIZE = 3000; 
     Configuration conf = new Configuration();
     conf.setLong("dfs.block.size", BLOCK_SIZE);
@@ -83,7 +95,7 @@ public class TestLeaseRecovery extends junit.framework.TestCase {
       InterDatanodeProtocol[] idps = new InterDatanodeProtocol[REPLICATION_NUM];
       DataNode[] datanodes = new DataNode[REPLICATION_NUM];
       for(int i = 0; i < REPLICATION_NUM; i++) {
-        idps[i] = DataNode.createInterDataNodeProtocolProxy(datanodeinfos[i], conf);
+        idps[i] = DataNode.createInterDataNodeProtocolProxy(datanodeinfos[i], conf, 0);
         datanodes[i] = cluster.getDataNode(datanodeinfos[i].getIpcPort());
         assertTrue(datanodes[i] != null);
       }
@@ -101,14 +113,18 @@ public class TestLeaseRecovery extends junit.framework.TestCase {
       for(int i = 0; i < REPLICATION_NUM; i++) {
         newblocksizes[i] = AppendTestUtil.nextInt(lastblocksize);
       }
+      if (forceOneBlockToZero) {
+        newblocksizes[0] = 0;
+      }
       DataNode.LOG.info("newblocksizes = " + Arrays.asList(newblocksizes)); 
 
       //update blocks with random block sizes
       Block[] newblocks = new Block[REPLICATION_NUM];
       for(int i = 0; i < REPLICATION_NUM; i++) {
+        DataNode dn = datanodes[i];
+        FSDatasetTestUtil.truncateBlock(dn, lastblock, newblocksizes[i]);
         newblocks[i] = new Block(lastblock.getBlockId(), newblocksizes[i],
             lastblock.getGenerationStamp());
-        idps[i].updateBlock(lastblock, newblocks[i], false);
         checkMetaInfo(newblocks[i], idps[i]);
       }
 

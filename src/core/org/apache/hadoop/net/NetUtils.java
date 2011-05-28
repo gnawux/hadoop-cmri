@@ -26,6 +26,7 @@ import java.net.Socket;
 import java.net.SocketAddress;
 import java.net.URI;
 import java.net.UnknownHostException;
+import java.net.ConnectException;
 import java.nio.channels.SocketChannel;
 import java.util.Map.Entry;
 import java.util.*;
@@ -131,6 +132,9 @@ public class NetUtils {
    */
   public static InetSocketAddress createSocketAddr(String target,
                                                    int defaultPort) {
+    if (target == null) {
+      throw new IllegalArgumentException("Target address cannot be null.");
+    }
     int colonIndex = target.indexOf(':');
     if (colonIndex < 0 && defaultPort == -1) {
       throw new RuntimeException("Not a host:port pair: " + target);
@@ -403,6 +407,21 @@ public class NetUtils {
     } else {
       SocketIOWithTimeout.connect(ch, endpoint, timeout);
     }
+
+    // There is a very rare case allowed by the TCP specification, such that
+    // if we are trying to connect to an endpoint on the local machine,
+    // and we end up choosing an ephemeral port equal to the destination port,
+    // we will actually end up getting connected to ourself (ie any data we
+    // send just comes right back). This is only possible if the target
+    // daemon is down, so we'll treat it like connection refused.
+    if (socket.getLocalPort() == socket.getPort() &&
+        socket.getLocalAddress().equals(socket.getInetAddress())) {
+      LOG.info("Detected a loopback TCP socket, disconnecting it");
+      socket.close();
+      throw new ConnectException(
+        "Localhost targeted connection resulted in a loopback. " +
+        "No daemon is listening on the target port.");
+    }
   }
   
   /** 
@@ -414,7 +433,7 @@ public class NetUtils {
    * @return its IP address in the string format
    */
   public static String normalizeHostName(String name) {
-    if (Character.digit(name.charAt(0), 16) != -1) { // it is an IP
+    if (Character.digit(name.charAt(0), 10) != -1) { //FIXME 
       return name;
     } else {
       try {

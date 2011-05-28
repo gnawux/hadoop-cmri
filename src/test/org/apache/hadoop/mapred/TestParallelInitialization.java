@@ -43,10 +43,11 @@ public class TestParallelInitialization extends TestCase {
   class FakeJobInProgress extends JobInProgress {
    
     public FakeJobInProgress(JobConf jobConf,
-        FakeTaskTrackerManager taskTrackerManager) throws IOException {
-      super(new JobID("test", ++jobCounter), jobConf);
+        FakeTaskTrackerManager taskTrackerManager,
+        JobTracker jt) throws IOException {
+      super(new JobID("test", ++jobCounter), jobConf,
+          jt);
       this.startTime = System.currentTimeMillis();
-      this.status = new JobStatus(getJobID(), 0f, 0f, JobStatus.PREP);
       this.status.setJobPriority(JobPriority.NORMAL);
       this.status.setStartTime(startTime);
     }
@@ -126,7 +127,7 @@ public class TestParallelInitialization extends TestCase {
     }
     
     public int getNextHeartbeatInterval() {
-      return MRConstants.HEARTBEAT_INTERVAL_MIN;
+      return MRConstants.HEARTBEAT_INTERVAL_MIN_DEFAULT;
     }
 
     public void killJob(JobID jobid) {
@@ -154,6 +155,11 @@ public class TestParallelInitialization extends TestCase {
         failJob(job);
       }
     }
+
+    public boolean killTask(TaskAttemptID attemptId, boolean shouldFail) {
+      return true;
+    }
+
     // Test methods
     
     public synchronized void failJob(JobInProgress job) {
@@ -213,7 +219,8 @@ public class TestParallelInitialization extends TestCase {
     // will be inited first and that will hang
     
     for (int i = 0; i < NUM_JOBS; i++) {
-      jobs[i] = new FakeJobInProgress(jobConf, taskTrackerManager);
+      jobs[i] = new FakeJobInProgress(jobConf, taskTrackerManager, 
+          UtilsForTests.getJobTracker());
       jobs[i].getStatus().setRunState(JobStatus.PREP);
       taskTrackerManager.submitJob(jobs[i]);
     }

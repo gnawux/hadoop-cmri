@@ -25,7 +25,6 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.util.LinkedList;
-import java.util.zip.CRC32;
 import java.util.zip.Checksum;
 
 import org.apache.commons.logging.Log;
@@ -40,6 +39,7 @@ import org.apache.hadoop.hdfs.protocol.DataTransferProtocol.PipelineAck;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.util.Daemon;
 import org.apache.hadoop.util.DataChecksum;
+import org.apache.hadoop.util.PureJavaCrc32;
 import org.apache.hadoop.util.StringUtils;
 import static org.apache.hadoop.hdfs.server.datanode.DataNode.DN_CLIENTTRACE_FORMAT;
 
@@ -75,6 +75,7 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
   DatanodeInfo srcDataNode = null;
   private Checksum partialCrc = null;
   private DataNode datanode = null;
+  volatile private boolean mirrorError;
 
   BlockReceiver(Block block, DataInputStream in, String inAddr,
                 String myAddr, boolean isRecovery, String clientName, 
@@ -95,8 +96,9 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
       //
       // Open local disk out
       //
-      streams = datanode.data.writeToBlock(block, isRecovery);
-      this.finalized = datanode.data.isValidBlock(block);
+      streams = datanode.data.writeToBlock(block, isRecovery,
+                              clientName == null || clientName.length() == 0);
+      this.finalized = false;
       if (streams != null) {
         this.out = streams.dataOut;
         this.checksumOut = new DataOutputStream(new BufferedOutputStream(
@@ -116,11 +118,16 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
       
       // check if there is a disk error
       IOException cause = FSDataset.getCauseIfDiskError(ioe);
+      
       if (cause != null) { // possible disk error
+        DataNode.LOG.warn("Disk-related IOException in BlockReceiver constructor. Cause is ",
+          cause);
         ioe = cause;
         datanode.checkDiskError(ioe); // may throw an exception here
+      } else {
+        DataNode.LOG.warn("Non-disk IOException in BlockReceiver constructor. Cause is ",
+          ioe);
       }
-      
       throw ioe;
     }
   }
@@ -173,21 +180,19 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
 
   /**
    * While writing to mirrorOut, failure to write to mirror should not
-   * affect this datanode unless a client is writing the block.
+   * affect this datanode.
    */
   private void handleMirrorOutError(IOException ioe) throws IOException {
-    LOG.info(datanode.dnRegistration + ":Exception writing block " +
+    LOG.info(datanode.dnRegistration + ": Exception writing block " +
              block + " to mirror " + mirrorAddr + "\n" +
              StringUtils.stringifyException(ioe));
-    mirrorOut = null;
-    //
-    // If stream-copy fails, continue
-    // writing to disk for replication requests. For client
-    // writes, return error so that the client can do error
-    // recovery.
-    //
-    if (clientName.length() > 0) {
+    if (Thread.interrupted()) { // shut down if the thread is interrupted
       throw ioe;
+    } else { // encounter an error while writing to mirror
+      // continue to run even if can not write to mirror
+      // notify client of the error
+      // and wait for the client to shut down the pipeline
+      mirrorError = true;
     }
   }
   
@@ -397,7 +402,7 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
     setBlockPosition(offsetInBlock);
     
     //First write the packet to the mirror:
-    if (mirrorOut != null) {
+    if (mirrorOut != null && !mirrorError) {
       try {
         mirrorOut.write(buf.array(), buf.position(), buf.remaining());
         mirrorOut.flush();
@@ -477,7 +482,10 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
 
     /// flush entire packet before sending ack
     flush();
-
+    
+    // update length only after flush to disk
+    datanode.data.setVisibleLength(block, offsetInBlock);
+    
     // put in queue for pending acks
     if (responder != null) {
       ((PacketResponder)responder.getRunnable()).enqueue(seqno,
@@ -515,7 +523,8 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
       if (clientName.length() > 0) {
         responder = new Daemon(datanode.threadGroup, 
                                new PacketResponder(this, block, mirrIn, 
-                                                   replyOut, numTargets));
+                                                   replyOut, numTargets,
+                                                   Thread.currentThread()));
         responder.start(); // start thread to processes reponses
       }
 
@@ -624,10 +633,12 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
       computePartialChunkCrc(offsetInBlock, offsetInChecksum, bytesPerChecksum);
     }
 
-    LOG.info("Changing block file offset of block " + block + " from " + 
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Changing block file offset of block " + block + " from " + 
         datanode.data.getChannelPosition(block, streams) +
              " to " + offsetInBlock +
              " meta file offset to " + offsetInChecksum);
+    }
 
     // set the position of the block file
     datanode.data.setChannelPosition(block, streams, offsetInBlock, offsetInChecksum);
@@ -668,7 +679,7 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
     }
 
     // compute crc of partial chunk from data read in the block file.
-    partialCrc = new CRC32();
+    partialCrc = new PureJavaCrc32();
     partialCrc.update(buf, 0, sizePartialChunk);
     LOG.info("Read in partial CRC chunk from disk for block " + block);
 
@@ -700,18 +711,21 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
     DataOutputStream replyOut;  // output to upstream datanode
     private int numTargets;     // number of downstream datanodes including myself
     private BlockReceiver receiver; // The owner of this responder.
+    private Thread receiverThread; // the thread that spawns this responder
 
     public String toString() {
       return "PacketResponder " + numTargets + " for Block " + this.block;
     }
 
     PacketResponder(BlockReceiver receiver, Block b, DataInputStream in, 
-                    DataOutputStream out, int numTargets) {
+                    DataOutputStream out, int numTargets,
+                    Thread receiverThread) {
       this.receiver = receiver;
       this.block = b;
       mirrorIn = in;
       replyOut = out;
       this.numTargets = numTargets;
+      this.receiverThread = receiverThread;
     }
 
     /**
@@ -748,6 +762,7 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
     private synchronized void lastDataNodeRun() {
       long lastHeartbeat = System.currentTimeMillis();
       boolean lastPacket = false;
+      final long startTime = ClientTraceLog.isInfoEnabled() ? System.nanoTime() : 0;
 
       while (running && datanode.shouldRun && !lastPacket) {
         long now = System.currentTimeMillis();
@@ -800,6 +815,7 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
             if (pkt.lastPacketInBlock) {
               if (!receiver.finalized) {
                 receiver.close();
+                final long endTime = ClientTraceLog.isInfoEnabled() ? System.nanoTime() : 0;
                 block.setNumBytes(receiver.offsetInBlock);
                 datanode.data.finalizeBlock(block);
                 datanode.myMetrics.blocksWritten.inc();
@@ -807,10 +823,11 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
                     DataNode.EMPTY_DEL_HINT);
                 if (ClientTraceLog.isInfoEnabled() &&
                     receiver.clientName.length() > 0) {
+                  long offset = 0;
                   ClientTraceLog.info(String.format(DN_CLIENTTRACE_FORMAT,
-                        receiver.inAddr, receiver.myAddr, block.getNumBytes(),
-                        "HDFS_WRITE", receiver.clientName,
-                        datanode.dnRegistration.getStorageID(), block));
+                        receiver.inAddr, receiver.myAddr, block.getNumBytes(), 
+                        "HDFS_WRITE", receiver.clientName, offset,
+                        datanode.dnRegistration.getStorageID(), block, endTime-startTime));
                 } else {
                   LOG.info("Received block " + block + 
                            " of size " + block.getNumBytes() + 
@@ -824,7 +841,14 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
                 DataTransferProtocol.OP_STATUS_SUCCESS}).write(replyOut);
             replyOut.flush();
         } catch (Exception e) {
+          LOG.warn("IOException in BlockReceiver.lastNodeRun: ", e);
           if (running) {
+            try {
+              datanode.checkDiskError(e); // may throw an exception here
+            } catch (IOException ioe) {
+              LOG.warn("DataNode.checkDiskError failed in lastDataNodeRun with: ",
+                  ioe);
+            }
             LOG.info("PacketResponder " + block + " " + numTargets + 
                      " Exception " + StringUtils.stringifyException(e));
             running = false;
@@ -848,11 +872,11 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
       }
 
       boolean lastPacketInBlock = false;
+      boolean isInterrupted = false;
+      final long startTime = ClientTraceLog.isInfoEnabled() ? System.nanoTime() : 0;
       while (running && datanode.shouldRun && !lastPacketInBlock) {
 
         try {
-            boolean didRead = false;
-
             /**
              * Sequence number -2 is a special value that is used when
              * a DN fails to read an ack from a downstream. In this case,
@@ -861,31 +885,23 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
              * as an UNKNOWN value.
              */
             long expected = -2;
+            long seqno = -2;
 
             PipelineAck ack = new PipelineAck();
             try { 
-              // read an ack from downstream datanode
-              ack.readFields(mirrorIn, numTargets);
-              if (LOG.isDebugEnabled()) {
-                LOG.debug("PacketResponder " + numTargets + " got " + ack);
+              if (!mirrorError) {
+                // read an ack from downstream datanode
+                ack.readFields(mirrorIn, numTargets);
+                if (LOG.isDebugEnabled()) {
+                  LOG.debug("PacketResponder " + numTargets + " got " + ack);
+                }
+                seqno = ack.getSeqno();
               }
-              long seqno = ack.getSeqno();
-              didRead = true;
               if (seqno == PipelineAck.HEART_BEAT.getSeqno()) {
                 ack.write(replyOut); // send keepalive
                 replyOut.flush();
                 continue;
-              } else if (seqno == -2) {
-                // A downstream node must have failed to read an ack. We need
-                // to forward this on.
-                assert ! ack.isSuccess();
-              } else {
-                if (seqno < 0) {
-                  throw new IOException("Received an invalid negative sequence number. "
-                                        + "Ack = " + ack);
-                }
-                assert seqno >= 0;
-
+              } else if (seqno >= 0 || mirrorError) {
                 Packet pkt = null;
                 synchronized (this) {
                   while (running && datanode.shouldRun && ackQueue.size() == 0) {
@@ -897,10 +913,13 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
                     }
                     wait();
                   }
+                  if (!running || !datanode.shouldRun) {
+                    break;
+                  }
                   pkt = ackQueue.removeFirst();
                   expected = pkt.seqno;
                   notifyAll();
-                  if (seqno != expected) {
+                  if (seqno != expected && !mirrorError) {
                     throw new IOException("PacketResponder " + numTargets +
                                           " for block " + block +
                                           " expected seqno:" + expected +
@@ -909,33 +928,40 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
                   lastPacketInBlock = pkt.lastPacketInBlock;
                 }
               }
-            } catch (Throwable e) {
-              if (running) {
-                LOG.info("PacketResponder " + block + " " + numTargets + 
-                         " Exception " + StringUtils.stringifyException(e));
-                running = false;
+            } catch (InterruptedException ine) {
+              isInterrupted = true;
+            } catch (IOException ioe) {
+              if (Thread.interrupted()) {
+            	isInterrupted = true;
+              } else {
+                // continue to run even if can not read from mirror
+                // notify client of the error
+                // and wait for the client to shut down the pipeline
+                mirrorError = true;
+                LOG.info("PacketResponder " + block + " " + numTargets +
+                    " Exception " + StringUtils.stringifyException(ioe));
+
               }
             }
 
-            if (Thread.interrupted()) {
+            if (Thread.interrupted() || isInterrupted) {
               /* The receiver thread cancelled this thread. 
                * We could also check any other status updates from the 
                * receiver thread (e.g. if it is ok to write to replyOut). 
                * It is prudent to not send any more status back to the client
                * because this datanode has a problem. The upstream datanode
-               * will detect a timout on heartbeats and will declare that
-               * this datanode is bad, and rightly so.
+               * will detect that this datanode is bad, and rightly so.
                */
               LOG.info("PacketResponder " + block +  " " + numTargets +
                        " : Thread is interrupted.");
-              running = false;
-              continue;
+              break;
             }
             
             // If this is the last packet in block, then close block
             // file and finalize the block before responding success
             if (lastPacketInBlock && !receiver.finalized) {
               receiver.close();
+              final long endTime = ClientTraceLog.isInfoEnabled() ? System.nanoTime() : 0;
               block.setNumBytes(receiver.offsetInBlock);
               datanode.data.finalizeBlock(block);
               datanode.myMetrics.blocksWritten.inc();
@@ -943,10 +969,11 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
                   DataNode.EMPTY_DEL_HINT);
               if (ClientTraceLog.isInfoEnabled() &&
                   receiver.clientName.length() > 0) {
+                long offset = 0;
                 ClientTraceLog.info(String.format(DN_CLIENTTRACE_FORMAT,
-                      receiver.inAddr, receiver.myAddr, block.getNumBytes(),
-                      "HDFS_WRITE", receiver.clientName,
-                      datanode.dnRegistration.getStorageID(), block));
+                      receiver.inAddr, receiver.myAddr, block.getNumBytes(), 
+                      "HDFS_WRITE", receiver.clientName, offset, 
+                      datanode.dnRegistration.getStorageID(), block, endTime-startTime));
               } else {
                 LOG.info("Received block " + block + 
                          " of size " + block.getNumBytes() + 
@@ -956,7 +983,7 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
 
             // construct my ack message.
             short[] replies = new short[1 + numTargets];
-            if (!didRead) { // no ack is read
+            if (mirrorError) { // no ack is read
               replies[0] = DataTransferProtocol.OP_STATUS_SUCCESS;
               // Fill all downstream nodes with ERROR - the client will
               // eject the first node with ERROR status (our mirror)
@@ -980,24 +1007,21 @@ class BlockReceiver implements java.io.Closeable, FSConstants {
                         " for block " + block +
                         " responded an ack: " + replyAck);
             }
-
-            // If we forwarded an error response from a downstream datanode
-            // and we are acting on behalf of a client, then we quit. The 
-            // client will drive the recovery mechanism.
-            if (!replyAck.isSuccess() && receiver.clientName.length() > 0) {
-              running = false;
+        } catch (Throwable e) {
+          LOG.warn("IOException in BlockReceiver.run(): ", e);
+          if (running) {
+            try {
+              if (e instanceof IOException) {
+                datanode.checkDiskError((Exception) e); // may throw an exception here
+              }
+            } catch (IOException ioe) {
+              LOG.warn("DataNode.checkDiskError failed in run() with: ", ioe);
             }
-        } catch (IOException e) {
-          if (running) {
             LOG.info("PacketResponder " + block + " " + numTargets + 
                      " Exception " + StringUtils.stringifyException(e));
-            running = false;
-          }
-        } catch (RuntimeException e) {
-          if (running) {
-            LOG.info("PacketResponder " + block + " " + numTargets + 
-                     " Exception " + StringUtils.stringifyException(e));
-            running = false;
+            if (!Thread.interrupted()) { // error not caused by interruption
+              receiverThread.interrupt();
+            }
           }
         }
       }

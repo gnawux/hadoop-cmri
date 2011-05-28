@@ -29,8 +29,12 @@ import java.util.Random;
 import java.io.DataInput;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.SocketTimeoutException;
+
+import javax.net.SocketFactory;
 
 import junit.framework.TestCase;
+import static org.mockito.Mockito.*;
 
 import org.apache.hadoop.conf.Configuration;
 
@@ -41,6 +45,7 @@ public class TestIPC extends TestCase {
   
   final private static Configuration conf = new Configuration();
   final static private int PING_INTERVAL = 1000;
+  final static private int MIN_SLEEP_TIME = 1000;
   
   static {
     Client.setPingInterval(conf, PING_INTERVAL);
@@ -65,7 +70,7 @@ public class TestIPC extends TestCase {
         throws IOException {
       if (sleep) {
         try {
-          Thread.sleep(RANDOM.nextInt(2*PING_INTERVAL));      // sleep a bit
+          Thread.sleep(RANDOM.nextInt(PING_INTERVAL) + MIN_SLEEP_TIME);      // sleep a bit
         } catch (InterruptedException e) {}
       }
       return param;                               // echo param as result
@@ -89,7 +94,7 @@ public class TestIPC extends TestCase {
         try {
           LongWritable param = new LongWritable(RANDOM.nextLong());
           LongWritable value =
-            (LongWritable)client.call(param, server, null, null);
+            (LongWritable)client.call(param, server, null, null, 0);
           if (!param.equals(value)) {
             LOG.fatal("Call failed!");
             failed = true;
@@ -122,7 +127,7 @@ public class TestIPC extends TestCase {
           Writable[] params = new Writable[addresses.length];
           for (int j = 0; j < addresses.length; j++)
             params[j] = new LongWritable(RANDOM.nextLong());
-          Writable[] values = client.call(params, addresses, null, null);
+          Writable[] values = client.call(params, addresses, null, null, conf);
           for (int j = 0; j < addresses.length; j++) {
             if (!params[j].equals(values[j])) {
               LOG.fatal("Call failed!");
@@ -140,6 +145,7 @@ public class TestIPC extends TestCase {
 
   public void testSerial() throws Exception {
     testSerial(3, false, 2, 5, 100);
+    testSerial(3, true, 2, 5, 10);
   }
 
   public void testSerial(int handlerCount, boolean handlerSleep, 
@@ -217,7 +223,7 @@ public class TestIPC extends TestCase {
     InetSocketAddress address = new InetSocketAddress("127.0.0.1", 10);
     try {
       client.call(new LongWritable(RANDOM.nextLong()),
-              address, null, null);
+              address, null, null, 0, conf);
       fail("Expected an exception to have been thrown");
     } catch (IOException e) {
       String message = e.getMessage();
@@ -248,6 +254,22 @@ public class TestIPC extends TestCase {
     }
   }
 
+  private static class LongRTEWritable extends LongWritable {
+    private final static String ERR_MSG = 
+      "Come across an runtime exception while reading";
+    
+    LongRTEWritable() {}
+    
+    LongRTEWritable(long longValue) {
+      super(longValue);
+    }
+    
+    public void readFields(DataInput in) throws IOException {
+      super.readFields(in);
+      throw new RuntimeException(ERR_MSG);
+    }
+  }
+
   public void testErrorClient() throws Exception {
     // start server
     Server server = new TestServer(1, false);
@@ -258,7 +280,7 @@ public class TestIPC extends TestCase {
     Client client = new Client(LongErrorWritable.class, conf);
     try {
       client.call(new LongErrorWritable(RANDOM.nextLong()),
-          addr, null, null);
+          addr, null, null, conf);
       fail("Expected an exception to have been thrown");
     } catch (IOException e) {
       // check error
@@ -267,6 +289,72 @@ public class TestIPC extends TestCase {
       assertEquals(LongErrorWritable.ERR_MSG, cause.getMessage());
     }
   }
+  
+  public void testRuntimeExceptionWritable() throws Exception {
+    // start server
+    Server server = new TestServer(1, false);
+    InetSocketAddress addr = NetUtils.getConnectAddress(server);
+    server.start();
+
+    // start client
+    Client client = new Client(LongRTEWritable.class, conf);
+    try {
+      client.call(new LongRTEWritable(RANDOM.nextLong()),
+              addr, null, null, 0);
+      fail("Expected an exception to have been thrown");
+    } catch (IOException e) {
+      // check error
+      Throwable cause = e.getCause();
+      assertTrue(cause instanceof IOException);
+      // it's double-wrapped
+      Throwable cause2 = cause.getCause();
+      assertTrue(cause2 instanceof RuntimeException);
+
+      assertEquals(LongRTEWritable.ERR_MSG, cause2.getMessage());
+    }
+  }
+
+  /**
+   * Test that, if the socket factory throws an IOE, it properly propagates
+   * to the client.
+   */
+  public void testSocketFactoryException() throws Exception {
+    SocketFactory mockFactory = mock(SocketFactory.class);
+    doThrow(new IOException("Injected fault")).when(mockFactory).createSocket();
+    Client client = new Client(LongWritable.class, conf, mockFactory);
+    
+    InetSocketAddress address = new InetSocketAddress("127.0.0.1", 10);
+    try {
+      client.call(new LongWritable(RANDOM.nextLong()),
+              address, null, null, 0);
+      fail("Expected an exception to have been thrown");
+    } catch (IOException e) {
+      assertTrue(e.getMessage().contains("Injected fault"));
+    }
+  }
+
+  public void testIpcTimeout() throws Exception {
+    // start server
+    Server server = new TestServer(1, true);
+    InetSocketAddress addr = NetUtils.getConnectAddress(server);
+    server.start();
+
+    // start client
+    Client client = new Client(LongWritable.class, conf);
+    // set timeout to be less than MIN_SLEEP_TIME
+    try {
+      client.call(new LongWritable(RANDOM.nextLong()),
+              addr, null, null, MIN_SLEEP_TIME/2);
+      fail("Expected an exception to have been thrown");
+    } catch (SocketTimeoutException e) {
+      LOG.info("Get a SocketTimeoutException ", e);
+    }
+    // set timeout to be bigger than 3*ping interval
+    client.call(new LongWritable(RANDOM.nextLong()),
+        addr, null, null, 3*PING_INTERVAL+MIN_SLEEP_TIME);
+  }
+  
+
 
   public static void main(String[] args) throws Exception {
 

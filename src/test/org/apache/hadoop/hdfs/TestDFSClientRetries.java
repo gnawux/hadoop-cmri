@@ -37,6 +37,9 @@ import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.io.*;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.security.AccessControlException;
+import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.security.token.SecretManager.InvalidToken;
+import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
 
 import junit.framework.TestCase;
 import static org.mockito.Mockito.*;
@@ -145,6 +148,13 @@ public class TestDFSClientRetries extends TestCase {
     public LocatedBlock addBlock(String src, String clientName)
     throws IOException
     {
+      return addBlock(src, clientName, null);
+    }
+
+
+    public LocatedBlock addBlock(String src, String clientName,
+                                 DatanodeInfo[] excludedNode)
+      throws IOException {
       num_calls++;
       if (num_calls > num_calls_allowed) { 
         throw new IOException("addBlock called more times than "
@@ -158,7 +168,6 @@ public class TestDFSClientRetries extends TestCase {
     
     
     // The following methods are stub methods that are not needed by this mock class
-
     public LocatedBlocks  getBlockLocations(String src, long offset, long length) throws IOException { return null; }
 
     public void create(String src, FsPermission masked, String clientName, boolean overwrite, short replication, long blockSize) throws IOException {}
@@ -185,7 +194,9 @@ public class TestDFSClientRetries extends TestCase {
 
     public boolean mkdirs(String src, FsPermission masked) throws IOException { return false; }
 
-    public FileStatus[] getListing(String src) throws IOException { return null; }
+    public HdfsFileStatus[] getListing(String src) throws IOException { return null; }
+
+    public DirectoryListing getListing(String src, byte[] startName) throws IOException { return null; }
 
     public void renewLease(String clientName) throws IOException {}
 
@@ -209,7 +220,7 @@ public class TestDFSClientRetries extends TestCase {
 
     public void metaSave(String filename) throws IOException {}
 
-    public FileStatus getFileInfo(String src) throws IOException { return null; }
+    public HdfsFileStatus getFileInfo(String src) throws IOException { return null; }
 
     public ContentSummary getContentSummary(String path) throws IOException { return null; }
 
@@ -219,6 +230,23 @@ public class TestDFSClientRetries extends TestCase {
 
     public void setTimes(String src, long mtime, long atime) throws IOException {}
 
+    public boolean recoverLease(String src, String clientName) throws IOException {
+      return true;
+    }
+
+    public Token<DelegationTokenIdentifier> getDelegationToken(Text renewer)
+        throws IOException {
+      return null;
+    }
+
+    public long renewDelegationToken(Token<DelegationTokenIdentifier> token)
+        throws InvalidToken, IOException {
+      return 0;
+    }
+
+    public void cancelDelegationToken(Token<DelegationTokenIdentifier> token)
+        throws IOException {
+    }
   }
   
   public void testNotYetReplicatedErrors() throws IOException

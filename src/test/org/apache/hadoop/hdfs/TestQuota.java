@@ -18,6 +18,7 @@
 package org.apache.hadoop.hdfs;
 
 import java.io.OutputStream;
+import java.security.PrivilegedExceptionAction;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.ContentSummary;
@@ -27,7 +28,7 @@ import org.apache.hadoop.hdfs.protocol.FSConstants;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.hdfs.tools.DFSAdmin;
 import org.apache.hadoop.io.IOUtils;
-import org.apache.hadoop.security.UnixUserGroupInformation;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.hdfs.protocol.NSQuotaExceededException;
 import org.apache.hadoop.hdfs.protocol.DSQuotaExceededException;
 
@@ -58,7 +59,8 @@ public class TestQuota extends TestCase {
     final Configuration conf = new Configuration();
     // set a smaller block size so that we can test with smaller 
     // Space quotas
-    conf.set("dfs.block.size", "512");
+    final int DEFAULT_BLOCK_SIZE = 512;
+    conf.setLong("dfs.block.size", DEFAULT_BLOCK_SIZE);
     conf.setBoolean("dfs.support.append", true);
     final MiniDFSCluster cluster = new MiniDFSCluster(conf, 2, true, null);
     final FileSystem fs = cluster.getFileSystem();
@@ -241,18 +243,91 @@ public class TestQuota extends TestCase {
                  (Long.MAX_VALUE/1024/1024 + 1024) + "m", args[2]);
       
       // 17:  setQuota by a non-administrator
-      UnixUserGroupInformation.saveToConf(conf, 
-          UnixUserGroupInformation.UGI_PROPERTY_NAME, 
-          new UnixUserGroupInformation(new String[]{"userxx\n", "groupyy\n"}));
-      DFSAdmin userAdmin = new DFSAdmin(conf);
-      args[1] = "100";
-      runCommand(userAdmin, args, true);
-      runCommand(userAdmin, true, "-setSpaceQuota", "1g", args[2]);
+      final String username = "userxx";
+      UserGroupInformation ugi = 
+        UserGroupInformation.createUserForTesting(username, 
+                                                  new String[]{"groupyy"});
       
-      // 18: clrQuota by a non-administrator
-      args = new String[] {"-clrQuota", parent.toString()};
-      runCommand(userAdmin, args, true);
-      runCommand(userAdmin, true, "-clrSpaceQuota",  args[1]);      
+      final String[] args2 = args.clone(); // need final ref for doAs block
+      ugi.doAs(new PrivilegedExceptionAction<Object>() {
+        @Override
+        public Object run() throws Exception {
+          assertEquals("Not running as new user", username, 
+              UserGroupInformation.getCurrentUser().getShortUserName());
+          DFSAdmin userAdmin = new DFSAdmin(conf);
+          
+          args2[1] = "100";
+          runCommand(userAdmin, args2, true);
+          runCommand(userAdmin, true, "-setSpaceQuota", "1g", args2[2]);
+          
+          // 18: clrQuota by a non-administrator
+          String[] args3 = new String[] {"-clrQuota", parent.toString()};
+          runCommand(userAdmin, args3, true);
+          runCommand(userAdmin, true, "-clrSpaceQuota",  args3[1]); 
+
+          return null;
+        }
+      });
+
+      // 19: clrQuota on the root directory ("/") should fail
+      runCommand(admin, true, "-clrQuota", "/");
+
+      // 20: setQuota on the root directory ("/") should succeed
+      runCommand(admin, false, "-setQuota", "1000000", "/");
+
+      runCommand(admin, true, "-clrQuota", "/");
+      runCommand(admin, false, "-clrSpaceQuota", "/");
+      runCommand(admin, new String[]{"-clrQuota", parent.toString()}, false);
+      runCommand(admin, false, "-clrSpaceQuota", parent.toString());
+
+      // 2: create directory /test/data2
+      final Path childDir2 = new Path(parent, "data2");
+      assertTrue(dfs.mkdirs(childDir2));
+
+      final Path childFile2 = new Path(childDir2, "datafile2");
+      final Path childFile3 = new Path(childDir2, "datafile3");
+      final long spaceQuota2 = DEFAULT_BLOCK_SIZE * replication;
+      final long fileLen2 = DEFAULT_BLOCK_SIZE;
+      // set space quota to a real low value 
+      runCommand(admin, false, "-setSpaceQuota", 
+                 Long.toString(spaceQuota2), childDir2.toString());
+      // clear space quota
+      runCommand(admin, false, "-clrSpaceQuota", childDir2.toString());
+      // create a file that is greater than the size of space quota
+      DFSTestUtil.createFile(fs, childFile2, fileLen2, replication, 0);
+
+      // now set space quota again. This should succeed
+      runCommand(admin, false, "-setSpaceQuota", Long.toString(spaceQuota2), 
+                 childDir2.toString());
+
+      hasException = false;
+      try {
+        DFSTestUtil.createFile(fs, childFile3, fileLen2, replication, 0);
+      } catch (DSQuotaExceededException e) {
+        hasException = true;
+      }
+      assertTrue(hasException);
+
+      // now test the same for root
+      final Path childFile4 = new Path("/", "datafile2");
+      final Path childFile5 = new Path("/", "datafile3");
+
+      runCommand(admin, true, "-clrQuota", "/");
+      runCommand(admin, false, "-clrSpaceQuota", "/");
+      // set space quota to a real low value 
+      runCommand(admin, false, "-setSpaceQuota", Long.toString(spaceQuota2), "/");
+      runCommand(admin, false, "-clrSpaceQuota", "/");
+      DFSTestUtil.createFile(fs, childFile4, fileLen2, replication, 0);
+      runCommand(admin, false, "-setSpaceQuota", Long.toString(spaceQuota2), "/");
+
+      hasException = false;
+      try {
+        DFSTestUtil.createFile(fs, childFile5, fileLen2, replication, 0);
+      } catch (DSQuotaExceededException e) {
+        hasException = true;
+      }
+      assertTrue(hasException);
+
     } finally {
       cluster.shutdown();
     }

@@ -31,10 +31,49 @@
   ordering of the filters.</description>
 </property>
 
+ <property>
+  <name>hadoop.security.group.mapping</name>
+  <value>org.apache.hadoop.security.ShellBasedUnixGroupsMapping</value>
+  <description>Class for user to group mapping (get groups for a given user)
+  </description>
+</property>
+
 <property>
   <name>hadoop.security.authorization</name>
   <value>false</value>
   <description>Is service-level authorization enabled?</description>
+</property>
+
+<property>
+  <name>hadoop.security.authentication</name>
+  <value>simple</value>
+  <description>Possible values are simple (no authentication), and kerberos
+  </description>
+</property>
+
+<!--
+<property>
+  <name>hadoop.security.service.user.name.key</name>
+  <value></value>
+  <description>Name of the kerberos principal of the user that owns
+  a given service daemon
+  </description>
+</property>
+-->
+
+<property>
+  <name>hadoop.workaround.non.threadsafe.getpwuid</name>
+  <value>false</value>
+  <description>Some operating systems or authentication modules are known to
+  have broken implementations of getpwuid_r and getpwgid_r, such that these
+  calls are not thread-safe. Symptoms of this problem include JVM crashes
+  with a stack trace inside these functions. If your system exhibits this
+  issue, enable this configuration parameter to include a lock around the
+  calls as a workaround.
+
+  An incomplete list of some systems known to have this issue is available
+  at http://wiki.apache.org/hadoop/KnownBrokenPwuidImplementations
+  </description>
 </property>
 
 <!--- logging properties -->
@@ -244,13 +283,22 @@
 
 
 <property>
-  <name>local.cache.size</name>
-  <value>10737418240</value>
-  <description>The limit on the size of cache you want to keep, set by default
-  to 10GB. This will act as a soft limit on the cache directory for out of band data.
+  <name>fs.automatic.close</name>
+  <value>true</value>
+  <description>By default, FileSystem instances are automatically closed at program
+  exit using a JVM shutdown hook. Setting this property to false disables this
+  behavior. This is an advanced option that should only be used by server applications
+  requiring a more carefully orchestrated shutdown sequence.
   </description>
 </property>
-            
+
+<property>
+  <name>fs.s3n.block.size</name>
+  <value>67108864</value>
+  <description>Block size to use when reading files using the native S3
+  filesystem (s3n: URIs).</description>
+</property>
+
 <property>
   <name>io.seqfile.compress.blocksize</name>
   <value>1000000</value>
@@ -435,6 +483,12 @@
   </description>
 </property>
 
+<property>
+  <name>hadoop.security.uid.cache.secs</name>
+  <value>14400</value>
+  <description> NativeIO maintains a cache from UID to UserName. This is
+  the timeout for an entry in that cache. </description>
+</property>
 
 
 </configuration>

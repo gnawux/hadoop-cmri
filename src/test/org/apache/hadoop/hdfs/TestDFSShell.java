@@ -25,6 +25,7 @@ import java.io.OutputStream;
 import java.io.PrintStream;
 import java.io.PrintWriter;
 import java.security.Permission;
+import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -34,6 +35,8 @@ import java.util.zip.GZIPOutputStream;
 
 import junit.framework.TestCase;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSInputChecker;
 import org.apache.hadoop.fs.FileSystem;
@@ -45,7 +48,6 @@ import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.FSDataset;
 import org.apache.hadoop.io.IOUtils;
-import org.apache.hadoop.security.UnixUserGroupInformation;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.ToolRunner;
@@ -54,6 +56,8 @@ import org.apache.hadoop.util.ToolRunner;
  * This class tests commands from DFSShell.
  */
 public class TestDFSShell extends TestCase {
+  private static final Log LOG = LogFactory.getLog(TestDFSShell.class);
+  
   static final String TEST_ROOT_DIR =
     new Path(System.getProperty("test.build.data","/tmp"))
     .toString().replace(' ', '+');
@@ -762,18 +766,15 @@ public class TestDFSShell extends TestCase {
      fs.delete(dir, true);
      fs.mkdirs(dir);
 
-     runCmd(shell, "-chmod", "u+rwx,g=rw,o-rwx", chmodDir);
-     assertEquals("rwxrw----",
-                  fs.getFileStatus(dir).getPermission().toString());
-
+     confirmPermissionChange(/* Setting */ "u+rwx,g=rw,o-rwx",
+                             /* Should give */ "rwxrw----", fs, shell, dir);
+     
      //create an empty file
      Path file = new Path(chmodDir, "file");
      TestDFSShell.writeFile(fs, file);
 
      //test octal mode
-     runCmd(shell, "-chmod", "644", file.toString());
-     assertEquals("rw-r--r--",
-                  fs.getFileStatus(file).getPermission().toString());
+     confirmPermissionChange( "644", "rw-r--r--", fs, shell, file);
 
      //test recursive
      runCmd(shell, "-chmod", "-R", "a+rwX", chmodDir);
@@ -781,8 +782,31 @@ public class TestDFSShell extends TestCase {
                   fs.getFileStatus(dir).getPermission().toString()); 
      assertEquals("rw-rw-rw-",
                   fs.getFileStatus(file).getPermission().toString());
+
+     // test sticky bit on directories
+     Path dir2 = new Path(dir, "stickybit" );
+     fs.mkdirs(dir2 );
+     LOG.info("Testing sticky bit on: " + dir2);
+     LOG.info("Sticky bit directory initial mode: " + 
+                   fs.getFileStatus(dir2).getPermission());
      
-     fs.delete(dir, true);     
+     confirmPermissionChange("u=rwx,g=rx,o=rx", "rwxr-xr-x", fs, shell, dir2);
+     
+     confirmPermissionChange("+t", "rwxr-xr-t", fs, shell, dir2);
+
+     confirmPermissionChange("-t", "rwxr-xr-x", fs, shell, dir2);
+
+     confirmPermissionChange("=t", "--------T", fs, shell, dir2);
+
+     confirmPermissionChange("0000", "---------", fs, shell, dir2);
+
+     confirmPermissionChange("1666", "rw-rw-rwT", fs, shell, dir2);
+
+     confirmPermissionChange("777", "rwxrwxrwt", fs, shell, dir2);
+     
+     fs.delete(dir2, true);
+     fs.delete(dir, true);
+     
     } finally {
       try {
         fs.close();
@@ -790,7 +814,20 @@ public class TestDFSShell extends TestCase {
       } catch (IOException ignored) {}
     }
   }
-  
+
+  // Apply a new permission to a path and confirm that the new permission
+  // is the one you were expecting
+  private void confirmPermissionChange(String toApply, String expected,
+      FileSystem fs, FsShell shell, Path dir2) throws IOException {
+    LOG.info("Confirming permission change of " + toApply + " to " + expected);
+    runCmd(shell, "-chmod", toApply, dir2.toString());
+
+    String result = fs.getFileStatus(dir2).getPermission().toString();
+
+    LOG.info("Permission change result: " + result);
+    assertEquals(expected, result);
+  }
+   
   private void confirmOwner(String owner, String group, 
                             FileSystem fs, Path... paths) throws IOException {
     for(Path path : paths) {
@@ -824,7 +861,7 @@ public class TestDFSShell extends TestCase {
     shell.setConf(conf);
     fs = cluster.getFileSystem();
     
-    /* For dfs, I am the super user and I can change ower of any file to
+    /* For dfs, I am the super user and I can change owner of any file to
      * anything. "-R" option is already tested by chmod test above.
      */
     
@@ -1141,33 +1178,37 @@ public class TestDFSShell extends TestCase {
   }
 
   public void testRemoteException() throws Exception {
-    UnixUserGroupInformation tmpUGI = new UnixUserGroupInformation("tmpname",
-        new String[] {
-        "mygroup"});
+    UserGroupInformation tmpUGI = 
+      UserGroupInformation.createUserForTesting("tmpname", new String[] {"mygroup"});
     MiniDFSCluster dfs = null;
     PrintStream bak = null;
     try {
-      Configuration conf = new Configuration();
+      final Configuration conf = new Configuration();
       dfs = new MiniDFSCluster(conf, 2, true, null);
       FileSystem fs = dfs.getFileSystem();
       Path p = new Path("/foo");
       fs.mkdirs(p);
       fs.setPermission(p, new FsPermission((short)0700));
-      UnixUserGroupInformation.saveToConf(conf,
-          UnixUserGroupInformation.UGI_PROPERTY_NAME, tmpUGI);
-      FsShell fshell = new FsShell(conf);
       bak = System.err;
-      ByteArrayOutputStream out = new ByteArrayOutputStream();
-      PrintStream tmp = new PrintStream(out);
-      System.setErr(tmp);
-      String[] args = new String[2];
-      args[0] = "-ls";
-      args[1] = "/foo";
-      int ret = ToolRunner.run(fshell, args);
-      assertTrue("returned should be -1", (ret == -1));
-      String str = out.toString();
-      assertTrue("permission denied printed", str.indexOf("Permission denied") != -1);
-      out.reset();
+      
+      tmpUGI.doAs(new PrivilegedExceptionAction<Object>() {
+        @Override
+        public Object run() throws Exception {
+          FsShell fshell = new FsShell(conf);
+          ByteArrayOutputStream out = new ByteArrayOutputStream();
+          PrintStream tmp = new PrintStream(out);
+          System.setErr(tmp);
+          String[] args = new String[2];
+          args[0] = "-ls";
+          args[1] = "/foo";
+          int ret = ToolRunner.run(fshell, args);
+          assertTrue("returned should be -1", (ret == -1));
+          String str = out.toString();
+          assertTrue("permission denied printed", str.indexOf("Permission denied") != -1);
+          out.reset();
+          return null;
+        }
+      });
     } finally {
       if (bak != null) {
         System.setErr(bak);
@@ -1238,7 +1279,7 @@ public class TestDFSShell extends TestCase {
   }
 
   public void testLsr() throws Exception {
-    Configuration conf = new Configuration();
+    final Configuration conf = new Configuration();
     MiniDFSCluster cluster = new MiniDFSCluster(conf, 2, true, null);
     DistributedFileSystem dfs = (DistributedFileSystem)cluster.getFileSystem();
 
@@ -1251,13 +1292,16 @@ public class TestDFSShell extends TestCase {
       final Path sub = new Path(root, "sub");
       dfs.setPermission(sub, new FsPermission((short)0));
 
-      final UserGroupInformation ugi = UserGroupInformation.getCurrentUGI();
-      final String tmpusername = ugi.getUserName() + "1";
-      UnixUserGroupInformation tmpUGI = new UnixUserGroupInformation(
+      final UserGroupInformation ugi = UserGroupInformation.getCurrentUser();
+      final String tmpusername = ugi.getShortUserName() + "1";
+      UserGroupInformation tmpUGI = UserGroupInformation.createUserForTesting(
           tmpusername, new String[] {tmpusername});
-      UnixUserGroupInformation.saveToConf(conf,
-            UnixUserGroupInformation.UGI_PROPERTY_NAME, tmpUGI);
-      String results = runLsr(new FsShell(conf), root, -1);
+      String results = tmpUGI.doAs(new PrivilegedExceptionAction<String>() {
+        @Override
+        public String run() throws Exception {
+          return runLsr(new FsShell(conf), root, -1);
+        }
+      });
       assertTrue(results.contains("zzz"));
     } finally {
       cluster.shutdown();
