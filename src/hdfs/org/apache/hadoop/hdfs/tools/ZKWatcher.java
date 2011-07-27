@@ -250,7 +250,7 @@ public class ZKWatcher implements Watcher {
         }
 	}
 	
-	static interface ZKListener {
+	public static interface ZKListener {
 		
 		void znodeDeleted();
 		
@@ -258,7 +258,7 @@ public class ZKWatcher implements Watcher {
 		
 	}
 	
-	static interface ZKChildListener {
+	public static interface ZKChildListener {
 		
 		void znodeChildrenChanged(List<String> children);
 	}
